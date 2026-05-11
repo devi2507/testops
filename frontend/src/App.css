@@ -1,0 +1,8 @@
+/* App.css — legacy overrides cleared.
+   All styles now live in:
+   - src/index.css         (design tokens + resets)
+   - src/styles/auth.css   (auth page)
+   - src/styles/layout.css (sidebar + navbar + shell)
+   - src/styles/dashboard.css (dashboard page)
+   - src/components/**/*.css (component-level styles)
+*/
