@@ -3,6 +3,7 @@ import {
   History as HistoryIcon, Code, Database, Layers, Globe, X,
   Award, Bug, Trash2, ExternalLink, RefreshCcw, ChevronRight
 } from 'lucide-react';
+import api from '../services/api';
 import './AuditHistory.css';
 
 const INPUT_ICON = {
@@ -49,9 +50,8 @@ export default function AuditHistory({ open, onClose, onLoad }) {
   const fetchHistory = async () => {
     setLoading(true);
     try {
-      const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-      const res = await fetch(`${apiUrl}/api/history`);
-      if (res.ok) setHistory(await res.json());
+      const data = await api.getHistory();
+      setHistory(data);
     } catch { /* backend offline */ }
     finally { setLoading(false); }
   };
@@ -64,19 +64,15 @@ export default function AuditHistory({ open, onClose, onLoad }) {
     if (!window.confirm('Delete all audit history? This cannot be undone.')) return;
     setClearing(true);
     try {
-      const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-      await fetch(`${apiUrl}/api/history`, { method: 'DELETE' });
+      await api.clearHistory();
       setHistory([]);
     } catch { /* ignore */ }
     finally { setClearing(false); }
   };
 
   const handleLoad = async (entry) => {
-    try {apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-      const res = await fetch(`${apiUrl}
-      const res = await fetch(`http://localhost:8000/api/history/${entry.id}`);
-      if (!res.ok) throw new Error('Not found');
-      const data = await res.json();
+    try {
+      const data = await api.getHistoryResult(entry.id);
       onLoad(data, entry.id);
       onClose();
     } catch (e) {

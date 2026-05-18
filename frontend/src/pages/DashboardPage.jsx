@@ -1,17 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import {
-  ScanLine, ShieldCheck, AlertTriangle, TrendingUp,
+  ScanLine, ShieldCheck, AlertTriangle, XOctagon,
   Plus, ArrowRight, Clock, Globe, Code, Database, Layers,
   RefreshCcw, CheckCircle, XCircle, History as HistoryIcon
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+import { isCancelled, isCompleted, needsReview } from '../services/scanUtils';
 import '../styles/dashboard.css';
 
 const INPUT_ICON = { codebase: Code, database: Database, both: Layers, url: Globe };
 const INPUT_LABEL = { codebase: 'Codebase', database: 'Database', both: 'Full Stack', url: 'URL Scan' };
 
 const gradeColor = (g = '') => {
+  const normalized = String(g).toLowerCase();
+  if (normalized.startsWith('cancel')) return 'var(--text-muted)';
   const l = g[0];
   if (l === 'A') return 'var(--success)';
   if (l === 'B') return 'var(--info)';
@@ -32,42 +36,74 @@ export default function DashboardPage({ onNavigate }) {
   const [backendOk, setBackendOk] = useState(null);
 
   useEffect(() => {
-    (async () => {
+    let active = true;
+
+    const checkBackend = async () => {
       try {
+        await api.waitForBackend();
+        const data = await api.getHistory();
+        if (!active) return;
+        setHistory(data);
+        setBackendOk(true);
+      } catch {
+        if (!active) return;
+        setBackendOk(false);
+      } finally {
+        if (!active) return;
+        setLoading(false);
+      }
+    };
+
+    checkBackend();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (backendOk !== false) return undefined;
+
+    const poll = setInterval(async () => {
+      try {
+        await api.waitForBackend({ attempts: 3, interval: 1000 });
         const data = await api.getHistory();
         setHistory(data);
         setBackendOk(true);
       } catch {
-        setBackendOk(false);
-      } finally {
-        setLoading(false);
+        // keep retrying until backend is available
       }
-    })();
-  }, []);
+    }, 5000);
+
+    return () => clearInterval(poll);
+  }, [backendOk]);
 
   // ── Derived stats ──
   const totalScans        = history.length;
-  const completedScans    = history.filter(h => h.grade).length;
+  const completedScans    = history.filter(h => isCompleted(h)).length;
   const criticalVulns     = history.reduce((sum, h) => {
-    if (!h.grade) return sum;
-    const l = h.grade[0];
+    if (!isCompleted(h)) return sum;
+    const l = (h.grade || '')[0];
     return sum + (l === 'D' || l === 'F' ? (h.bugsFound || 0) : 0);
   }, 0);
-  const successRate = totalScans > 0
-    ? Math.round(history.filter(h => h.grade && (h.grade[0] === 'A' || h.grade[0] === 'B')).length / totalScans * 100)
-    : 0;
-
+  const needsReviewCount  = history.filter(h => needsReview(h)).length;
+  const cancelledCount    = history.filter(h => isCancelled(h)).length;
+  
   const recentScans = history.slice(0, 6);
 
   const greetingHour = new Date().getHours();
   const greeting = greetingHour < 12 ? 'Good morning' : greetingHour < 17 ? 'Good afternoon' : 'Good evening';
 
   const STATS = [
-    { label: 'Total Scans', value: totalScans, icon: ScanLine,       color: 'var(--brand-primary)', bg: 'rgba(99,102,241,0.1)',  change: null },
-    { label: 'Completed',   value: completedScans, icon: ShieldCheck, color: 'var(--success)',       bg: 'var(--success-bg)',     change: null },
-    { label: 'Critical Findings', value: criticalVulns, icon: AlertTriangle, color: 'var(--error)', bg: 'var(--error-bg)',       change: null },
-    { label: 'Success Rate', value: `${successRate}%`, icon: TrendingUp, color: 'var(--info)',      bg: 'var(--info-bg)',        change: null },
+    { label: 'Total Scans', value: totalScans, icon: ScanLine,       color: 'var(--brand-primary)', bg: 'rgba(99,102,241,0.1)',  onClick: () => openHistory() },
+    { label: 'Completed',   value: completedScans, icon: ShieldCheck, color: 'var(--success)',       bg: 'var(--success-bg)',     onClick: () => openHistory('completed') },
+    { label: 'Needs Review', value: needsReviewCount, icon: AlertTriangle, color: 'var(--warning)', bg: 'rgba(245,158,11,0.1)', onClick: () => openHistory('review') },
+    { label: 'Cancelled',    value: cancelledCount,   icon: XOctagon,     color: 'var(--error)',      bg: 'var(--error-bg)',      onClick: () => openHistory('cancelled') },
   ];
+
+  const navigate = useNavigate();
+
+  const openHistory = (view) => {
+    const url = view ? `/history?view=${view}` : '/history';
+    navigate(url);
+  };
 
   return (
     <div className="dashboard animate-fade-up">
@@ -76,7 +112,7 @@ export default function DashboardPage({ onNavigate }) {
       {backendOk === false && (
         <div className="dash-offline-banner">
           <XCircle size={16} />
-          Backend is offline — start it on port 8000 to see your audit data.
+          Backend is offline or starting up — it will reconnect automatically once available.
         </div>
       )}
 
@@ -99,7 +135,12 @@ export default function DashboardPage({ onNavigate }) {
       {/* ── Stat Cards ── */}
       <section className="dash-stats">
         {STATS.map((s, i) => (
-          <div key={i} className="stat-card glass-card" style={{ '--stat-delay': `${i * 60}ms` }}>
+          <div
+            key={i}
+            className="stat-card glass-card"
+            style={{ '--stat-delay': `${i * 60}ms`, cursor: s.onClick ? 'pointer' : 'default' }}
+            onClick={s.onClick}
+          >
             <div className="stat-card__header">
               <span className="stat-card__label">{s.label}</span>
               <div className="stat-card__icon-wrap" style={{ background: s.bg }}>
@@ -176,7 +217,7 @@ export default function DashboardPage({ onNavigate }) {
                       <td><span className="badge badge--accent">{label}</span></td>
                       <td>
                         <span className="scan-grade" style={{ color: gc }}>
-                          {scan.grade || '—'}
+                          {scan.status === 'cancelled' ? 'Cancelled' : scan.grade || '—'}
                         </span>
                       </td>
                       <td>
@@ -200,10 +241,17 @@ export default function DashboardPage({ onNavigate }) {
                         </div>
                       </td>
                       <td>
-                        <span className="badge badge--success">
-                          <CheckCircle size={10} />
-                          Completed
-                        </span>
+                        {scan.status === 'cancelled' ? (
+                          <span className="badge badge--warning">
+                            <AlertTriangle size={10} />
+                            Cancelled
+                          </span>
+                        ) : (
+                          <span className="badge badge--success">
+                            <CheckCircle size={10} />
+                            Completed
+                          </span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -224,7 +272,6 @@ export default function DashboardPage({ onNavigate }) {
             { icon: Code,     label: 'Scan Codebase',      sub: 'Upload ZIP archive', color: 'var(--brand-primary)', page: 'scan' },
             { icon: Globe,    label: 'URL Security Scan',  sub: 'Black-box HTTP probe', color: 'var(--info)',         page: 'scan' },
             { icon: HistoryIcon, label: 'View History',       sub: 'Browse past audits',  color: 'var(--success)',       page: 'history' },
-            { icon: RefreshCcw, label: 'Re-run Last Scan', sub: 'Use previous config', color: 'var(--warning)',       page: 'scan' },
           ].map(({ icon: Icon, label, sub, color, page }, i) => (
             <button key={i} className="quick-action glass-card" onClick={() => onNavigate(page)}>
               <div className="quick-action__icon" style={{ color, background: `${color}18` }}>

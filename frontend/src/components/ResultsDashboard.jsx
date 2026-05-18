@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ShieldAlert, RefreshCcw, CheckCircle, AlertTriangle,
   XCircle, Info, ChevronDown, ChevronUp, Download,
-  TrendingUp, Bug, Award, ShieldCheck, Link,
+  Bug, ShieldCheck, Link,
   FileText, Lightbulb, Target, AlertCircle
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
@@ -104,11 +104,10 @@ function exportPDF(results) {
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
-export default function ResultsDashboard({ results, testId, onReset }) {
+export default function ResultsDashboard({ results, testId, onReset, backTo = '/scan', backLabel = 'Back' }) {
   const [expanded, setExpanded] = useState(null);
   const [copied, setCopied]     = useState(false);
-  const [activeSection, setActiveSection] = useState('vulnerabilities'); // vulnerabilities | analysis | comparison
-  const [previous, setPrevious] = useState(null);
+  const [activeSection, setActiveSection] = useState('vulnerabilities');
   const [severityFilter, setSeverityFilter] = useState('ALL');
   const [vulnSearch, setVulnSearch] = useState('');
   const [expandedFixes, setExpandedFixes] = useState({});
@@ -136,41 +135,25 @@ export default function ResultsDashboard({ results, testId, onReset }) {
   }, [bugs, critCount, highCount, lowCount, medCount]);
 
   useEffect(() => {
-    const key = 'testpilot_report_snapshots';
-    let snapshots = [];
-    try { snapshots = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
-    const last = snapshots.find(s => s.id !== testId);
-    setPrevious(last || null);
-    const current = {
-      id: testId || `local-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      score: results.securityScore,
-      bugs: bugs.map(b => ({ title: b.title, severity: b.severity, type: b.type })),
-    };
-    localStorage.setItem(key, JSON.stringify([current, ...snapshots.filter(s => s.id !== current.id)].slice(0, 8)));
-  }, [bugs, results.securityScore, testId]);
-
-  const comparison = useMemo(() => {
-    const previousBugs = previous?.bugs || [];
-    const currentTitles = new Set(bugs.map(b => b.title));
-    const previousTitles = new Set(previousBugs.map(b => b.title));
-    return {
-      fixed: previousBugs.filter(b => !currentTitles.has(b.title)).length,
-      newIssues: bugs.filter(b => !previousTitles.has(b.title)).length,
-      delta: previous ? results.securityScore - previous.score : 0,
-    };
-  }, [bugs, previous, results.securityScore]);
-
-  const executiveSummary = useMemo(() => {
-    if (noBugs) {
-      return 'No vulnerabilities detected in the selected scope. Keep baseline checks running in CI/CD and re-scan after major dependency or architecture changes.';
-    }
-    const urgent = critCount + highCount;
-    const trendText = previous
-      ? `Compared to the previous scan, score moved ${comparison.delta >= 0 ? 'up' : 'down'} by ${Math.abs(comparison.delta)} points with ${comparison.newIssues} new and ${comparison.fixed} fixed issue(s).`
-      : 'This is your current baseline scan; run another scan after remediation to measure improvement.';
-    return `This scan found ${total} issue(s), including ${urgent} high-priority item(s) requiring immediate remediation. Prioritize authentication/session hardening, input validation, and least-privilege controls. ${trendText}`;
-  }, [comparison.delta, comparison.fixed, comparison.newIssues, critCount, highCount, noBugs, previous, total]);
+    // store current report in localStorage so AI assistant can access it for context
+    try {
+      localStorage.setItem('testops_current_report', JSON.stringify({
+        id:            testId,
+        securityScore: results.securityScore,
+        score:         results.securityScore, // keep both for compatibility
+        grade:         results.grade,
+        bugsFound:     results.bugsFound,
+        target:        results.target || '',
+        bugs: bugs.map(b => ({
+          title:          b.title,
+          severity:       b.severity,
+          type:           b.type,
+          reason:         b.reason,
+          recommendation: b.recommendation,
+        })),
+      }));
+    } catch {}
+  }, [bugs, results.securityScore, results.grade, results.bugsFound, results.target, testId]);
 
   const visibleBugs = useMemo(() => {
     const q = vulnSearch.trim().toLowerCase();
@@ -188,13 +171,13 @@ export default function ResultsDashboard({ results, testId, onReset }) {
   }, [bugs, severityFilter, vulnSearch]);
 
   const copyLink = () => {
-    const url = `${window.location.origin}${window.location.pathname}#/report/${testId}`;
+    const url = `${window.location.origin}/reports/${testId}`;
     navigator.clipboard.writeText(url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
   };
 
   return (
     <div className="report-page animate-fade-up">
-      <BackButton label="Back" fallback="/scan" />
+      <BackButton label={backLabel} fallback={backTo} />
 
       {/* ══ HERO HEADER ════════════════════════════════════════════════════ */}
       <div className="report-hero glass-card">
@@ -224,9 +207,6 @@ export default function ResultsDashboard({ results, testId, onReset }) {
           )}
           <button className="rpt-btn rpt-btn--ghost" onClick={() => exportPDF(results)}>
             <Download size={14} /> Export PDF
-          </button>
-          <button className="rpt-btn rpt-btn--ghost" onClick={() => exportPDF(results)}>
-            <FileText size={14} /> Executive Summary
           </button>
           <button className="rpt-btn rpt-btn--primary" onClick={onReset}>
             <RefreshCcw size={14} /> New Scan
@@ -291,10 +271,6 @@ export default function ResultsDashboard({ results, testId, onReset }) {
               <h3>AI Security Score</h3>
               <p>Weighted across security, stability, maintainability, and performance signals.</p>
             </div>
-            <span className={`trend-pill ${comparison.delta >= 0 ? 'trend-pill--up' : 'trend-pill--down'}`}>
-              <TrendingUp size={13} />
-              {previous ? `${comparison.delta >= 0 ? '+' : ''}${comparison.delta} vs previous` : 'First baseline'}
-            </span>
           </div>
           <div className="score-breakdown">
             {breakdown.map(item => (
@@ -310,14 +286,6 @@ export default function ResultsDashboard({ results, testId, onReset }) {
         </div>
       </div>
 
-      <div className="report-exec-summary glass-card">
-        <div className="report-exec-summary__head">
-          <Lightbulb size={16} />
-          AI Executive Summary
-        </div>
-        <p>{executiveSummary}</p>
-      </div>
-
       {/* ══ SECTION TABS ═══════════════════════════════════════════════════ */}
       <div className="report-tabs">
         <button
@@ -331,12 +299,6 @@ export default function ResultsDashboard({ results, testId, onReset }) {
           onClick={() => setActiveSection('analysis')}
         >
           <Lightbulb size={15} /> AI Analysis
-        </button>
-        <button
-          className={`report-tab ${activeSection==='comparison' ? 'report-tab--active' : ''}`}
-          onClick={() => setActiveSection('comparison')}
-        >
-          <TrendingUp size={15} /> Comparison
         </button>
       </div>
 
@@ -536,38 +498,6 @@ export default function ResultsDashboard({ results, testId, onReset }) {
         </div>
       )}
 
-      {activeSection === 'comparison' && (
-        <div className="report-section">
-          <div className="comparison-grid">
-            {[
-              { label: 'Vulnerabilities Fixed', value: previous ? comparison.fixed : '-', tone: 'success' },
-              { label: 'New Issues', value: previous ? comparison.newIssues : '-', tone: comparison.newIssues > 0 ? 'error' : 'success' },
-              { label: 'Score Change', value: previous ? `${comparison.delta >= 0 ? '+' : ''}${comparison.delta}` : '-', tone: comparison.delta >= 0 ? 'success' : 'error' },
-            ].map(card => (
-              <div key={card.label} className={`comparison-card comparison-card--${card.tone} glass-card`}>
-                <span>{card.label}</span>
-                <strong>{card.value}</strong>
-              </div>
-            ))}
-          </div>
-          <div className="ai-analysis glass-card">
-            <div className="ai-analysis__head">
-              <div className="ai-analysis__icon"><Award size={18} color="var(--accent)" /></div>
-              <div>
-                <h3>Scan Comparison</h3>
-                <p>{previous ? `Compared with scan from ${new Date(previous.createdAt).toLocaleString()}` : 'Run another scan to establish a trend.'}</p>
-              </div>
-            </div>
-            <div className="ai-analysis__body">
-              <div className="ai-analysis__text">
-                {previous
-                  ? `This run has ${comparison.newIssues} new issue(s), ${comparison.fixed} fixed issue(s), and a score movement of ${comparison.delta >= 0 ? '+' : ''}${comparison.delta} points.`
-                  : 'The next completed report will unlock fixed/new issue analysis and score trend movement.'}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

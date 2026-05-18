@@ -242,6 +242,39 @@
   color: var(--text-muted);
 }
 
+.drop-zone--error {
+  border-color: var(--error);
+  background: var(--error-bg);
+}
+
+.drop-zone__icon--error {
+  color: var(--error) !important;
+}
+
+.remove-file-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  align-self: flex-end;
+  margin-top: -4px;
+}
+
+.remove-file-btn:hover {
+  color: var(--error);
+}
+
+.inline-file-error {
+  color: var(--error);
+  font-size: 0.75rem;
+  margin-top: 2px;
+  background: var(--error-bg);
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--error-border);
+}
+
 /* ── Suite cards ── */
 .suite-grid {
   display: grid;
@@ -334,6 +367,93 @@
   position: relative;
   display: flex;
   align-items: center;
+}
+
+/* ── Templates ── */
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.template-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  cursor: pointer;
+  transition: var(--transition);
+  gap: 10px;
+}
+
+.template-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+
+.template-card__info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.template-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.template-meta {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.template-del-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: var(--transition);
+}
+
+.template-del-btn:hover {
+  color: var(--error);
+  background: var(--error-bg);
+}
+
+/* ── Footer Actions ── */
+.wizard-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.save-template-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 10px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.save-template-btn:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
 .api-key-icon {

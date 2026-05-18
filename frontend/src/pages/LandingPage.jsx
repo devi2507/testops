@@ -32,7 +32,7 @@ const STATS = [
   { value: '24/7', label: 'Monitoring' },
 ];
 
-export default function LandingPage({ onGetStarted, onSignIn }) {
+export default function LandingPage({ onGetStarted }) {
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -82,9 +82,6 @@ export default function LandingPage({ onGetStarted, onSignIn }) {
           <div className="lp-hero__buttons">
             <button className="lp-btn lp-btn--primary" onClick={onGetStarted}>
               Launch Platform <ArrowRight size={15} />
-            </button>
-            <button className="lp-btn lp-btn--ghost" onClick={onSignIn}>
-              Sign In <ChevronRight size={15} />
             </button>
           </div>
         </div>

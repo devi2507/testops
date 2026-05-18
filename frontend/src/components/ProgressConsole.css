@@ -99,6 +99,29 @@
   overflow: hidden;
 }
 
+.exec-stop-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--error);
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+  margin-left: auto;
+}
+.exec-stop-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 80%, black);
+}
+.exec-stop-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 .exec-progress-bar__fill {
   height: 100%;
   border-radius: 99px;

@@ -12,7 +12,7 @@ import HistoryPage from './pages/HistoryPage';
 import ProfilePage from './pages/ProfilePage';
 import Sidebar from './components/layout/Sidebar';
 import Navbar from './components/layout/Navbar';
-import AiChat from './components/AiChat';
+import AiAssistant from './components/AiAssistant';
 import './styles/layout.css';
 
 const PAGE_PATHS = {
@@ -41,11 +41,13 @@ function AppShell() {
           <Route path="/scan" element={<NewScanPage />} />
           <Route path="/history" element={<HistoryPage onNavigate={onNavigate} />} />
           <Route path="/reports" element={<ReportPage onNavigate={onNavigate} />} />
+          <Route path="/reports/:reportId" element={<ReportPage onNavigate={onNavigate} />} />
+          <Route path="/report/:reportId" element={<ReportPage onNavigate={onNavigate} />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>
-      <AiChat />
+      <AiAssistant />
     </div>
   );
 }

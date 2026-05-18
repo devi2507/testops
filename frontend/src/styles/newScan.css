@@ -192,13 +192,57 @@
   color: var(--text-muted);
 }
 
+.template-create-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 8px 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.template-create-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.template-section-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.template-empty-hint {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+
 .template-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
 }
 
-.template-card {
+/* Default (built-in) template card — plain button */
+.template-card--default {
   padding: 13px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
@@ -208,19 +252,70 @@
   color: var(--text-primary);
   cursor: pointer;
   transition: var(--transition);
+  width: 100%;
 }
 
-.template-card:hover {
+.template-card--default:hover {
   border-color: var(--accent-border);
   background: var(--accent-subtle);
   transform: translateY(-1px);
 }
 
+/* User template card — wrapper div with inner button + delete button */
+.template-card--user {
+  position: relative;
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  transition: var(--transition);
+  overflow: hidden;
+}
+
+.template-card--user:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  transform: translateY(-1px);
+}
+
+.template-card__body {
+  display: block;
+  width: 100%;
+  padding: 13px 36px 13px 13px;
+  background: none;
+  border: none;
+  text-align: left;
+  font-family: inherit;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.template-card__delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition);
+  padding: 0;
+}
+
+.template-card__delete:hover {
+  color: var(--error);
+  background: var(--error-bg);
+}
+
 .template-card__top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   color: var(--accent);
   font-size: 0.68rem;
   font-weight: 700;
@@ -229,17 +324,210 @@
   margin-bottom: 8px;
 }
 
-.template-card strong {
+.template-card--default strong,
+.template-card__body strong {
   display: block;
   font-size: 0.82rem;
   margin-bottom: 4px;
 }
 
-.template-card p {
+.template-card--default p,
+.template-card__body p {
   font-size: 0.7rem;
   color: var(--text-muted);
   line-height: 1.45;
 }
+
+/* Save as template button variant */
+.suite-controls__btn--save {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent) !important;
+  border-color: var(--accent-border) !important;
+  background: var(--accent-subtle) !important;
+}
+
+.suite-controls__btn--save:hover:not(:disabled) {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
+.suite-controls__btn--save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Create Template Modal ── */
+.tpl-modal {
+  width: min(520px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+
+.tpl-modal__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tpl-modal__head h3 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+
+.tpl-modal__head p {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.tpl-modal__close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: var(--transition);
+}
+
+.tpl-modal__close:hover { background: var(--error-bg); color: var(--error); border-color: var(--error-border); }
+
+.tpl-modal__body {
+  padding: 18px 22px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tpl-modal__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  display: block;
+}
+
+.tpl-modal__req { color: var(--error); }
+
+.tpl-modal__input {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg-input);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  outline: none;
+  transition: var(--transition);
+}
+
+.tpl-modal__input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+.tpl-modal__suites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.tpl-modal__types {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.tpl-modal__type,
+.tpl-modal__suite {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.tpl-modal__type:hover,
+.tpl-modal__suite:hover {
+  border-color: var(--accent-border);
+  color: var(--text-primary);
+}
+
+.tpl-modal__type--active,
+.tpl-modal__suite--active {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.tpl-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.tpl-modal__cancel {
+  padding: 8px 16px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-family: inherit;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.tpl-modal__cancel:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+
+.tpl-modal__save {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-family: inherit;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #fff;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.tpl-modal__save:hover:not(:disabled) { background: var(--accent-hover); }
+.tpl-modal__save:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ══ Step 2: Upload ══════════════════════════════════════════════════════ */
 .upload-zones { display: grid; grid-template-columns: 1fr; gap: 14px; }
@@ -828,6 +1116,9 @@
   .input-type-grid  { grid-template-columns: 1fr; }
   .suite-grid-new   { grid-template-columns: repeat(2, 1fr); }
   .template-grid { grid-template-columns: 1fr; }
+  .template-panel__head { flex-direction: column; }
+  .template-create-btn { width: 100%; justify-content: center; }
+  .tpl-modal__types { grid-template-columns: 1fr; }
   .upload-zones--dual { grid-template-columns: 1fr; }
   .newscan-content  { padding: 20px; }
   .newscan-steps .step-node__label { display: none; }

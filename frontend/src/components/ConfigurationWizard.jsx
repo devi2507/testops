@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Database, Code, Layers, Play, UploadCloud, CheckCircle2,
-         Shield, Cpu, GitBranch, Lock, Zap, Globe, Wifi, Key as KeyIcon } from 'lucide-react';
+         Shield, Cpu, GitBranch, Lock, Zap, Globe, Wifi, Key as KeyIcon, Save, Bookmark, Trash2 } from 'lucide-react';
 import BackButton from './BackButton';
+import api from '../services/api';
 import './ConfigurationWizard.css';
 
 const TEST_OPTIONS = {
@@ -48,12 +49,54 @@ export default function ConfigurationWizard({ onStart }) {
   const codeDropRef   = useRef(null);
   const schemaDropRef = useRef(null);
 
+  const [fileError, setFileError]           = useState('');
+  const [schemaError, setSchemaError]       = useState('');
+  const [templates, setTemplates]           = useState([]);
+
+  useEffect(() => {
+    api.getTemplates().then(setTemplates).catch(() => {});
+  }, []);
+
   useEffect(() => {
     setSelectedTests(TEST_OPTIONS[inputType].map(t => t.id));
     setFile(null);
     setSchemaFile(null);
+    setFileError('');
+    setSchemaError('');
     setTargetUrl('');
   }, [inputType]);
+
+  const validateFile = (f, type) => {
+    if (!f) return null;
+    const name = f.name.toLowerCase();
+    const codeExts = ['.zip', '.js', '.ts', '.py', '.java', '.go', '.rb', '.php', '.cs', '.cpp', '.c', '.h'];
+    const dbExts = ['.zip', '.sql', '.json', '.prisma', '.ddl'];
+    
+    if (type === 'code') {
+      const isDb = ['.sql', '.ddl', '.prisma'].some(e => name.endsWith(e));
+      if (isDb) return 'Please upload a codebase file, not a database schema.';
+      if (!codeExts.some(e => name.endsWith(e))) return 'Invalid format. Allowed: .zip, .js, .ts, .py, .java, .go, etc.';
+    } else if (type === 'schema') {
+      const isCode = ['.js', '.ts', '.py', '.java', '.go', '.rb', '.php', '.cs', '.cpp', '.c', '.h'].some(e => name.endsWith(e));
+      if (isCode) return 'Please upload a database schema, not a codebase file.';
+      if (!dbExts.some(e => name.endsWith(e))) return 'Invalid format. Allowed: .zip, .sql, .ddl, .json, .prisma';
+    }
+    return null;
+  };
+
+  const handleFileChange = (f, target) => {
+    if (!f) return;
+    const err = validateFile(f, target);
+    if (target === 'schema') {
+      setSchemaError(err || '');
+      if (!err) setSchemaFile(f);
+      else setSchemaFile(null);
+    } else {
+      setFileError(err || '');
+      if (!err) setFile(f);
+      else setFile(null);
+    }
+  };
 
   const toggleTest = (id) =>
     setSelectedTests(prev =>
@@ -63,8 +106,9 @@ export default function ConfigurationWizard({ onStart }) {
   const isReady = () => {
     if (selectedTests.length === 0) return false;
     if (inputType === 'url')  return targetUrl.trim().length > 4;
-    if (inputType === 'both') return !!file && !!schemaFile;
-    return !!file;
+    if (inputType === 'both') return !!file && !!schemaFile && !fileError && !schemaError;
+    if (inputType === 'database') return !!file && !fileError;
+    return !!file && !fileError;
   };
 
   const handleDrop = (e, target) => {
@@ -72,8 +116,7 @@ export default function ConfigurationWizard({ onStart }) {
     setDragging(null);
     const dropped = e.dataTransfer.files[0];
     if (!dropped) return;
-    if (target === 'schema') setSchemaFile(dropped);
-    else setFile(dropped);
+    handleFileChange(dropped, target);
   };
 
   const handleStart = () => {
@@ -83,6 +126,40 @@ export default function ConfigurationWizard({ onStart }) {
     } else {
       onStart({ inputType, selectedTests, file, schemaFile });
     }
+  };
+
+  const handleSaveTemplate = async () => {
+    const name = prompt('Enter a name for this template:');
+    if (!name) return;
+    const template = {
+      id: `tpl-${Date.now()}`,
+      name,
+      inputType,
+      selectedTests,
+      targetUrl: inputType === 'url' ? targetUrl : null
+    };
+    try {
+      await api.createTemplate(template);
+      setTemplates([template, ...templates]);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleDeleteTemplate = async (id, e) => {
+    e.stopPropagation();
+    try {
+      await api.deleteTemplate(id);
+      setTemplates(templates.filter(t => t.id !== id));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const applyTemplate = (t) => {
+    setInputType(t.inputType);
+    setSelectedTests(t.selectedTests || []);
+    if (t.inputType === 'url' && t.targetUrl) setTargetUrl(t.targetUrl);
   };
 
   return (
@@ -99,6 +176,26 @@ export default function ConfigurationWizard({ onStart }) {
           Upload your code or schema — or paste a live URL — and let the AI surface vulnerabilities and quality issues.
         </p>
       </div>
+
+      {/* ── Templates ── */}
+      {templates.length > 0 && (
+        <section className="wizard-section">
+          <div className="step-label"><span className="step-num"><Bookmark size={14} /></span> Saved Templates</div>
+          <div className="template-grid">
+            {templates.map(t => (
+              <div key={t.id} className="template-card" onClick={() => applyTemplate(t)}>
+                <div className="template-card__info">
+                  <span className="template-name">{t.name}</span>
+                  <span className="template-meta">{INPUT_TYPES.find(i => i.id === t.inputType)?.label || t.inputType} • {t.selectedTests?.length || 0} tests</span>
+                </div>
+                <button className="template-del-btn" onClick={(e) => handleDeleteTemplate(t.id, e)}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── Step 1: Input Type ── */}
       <section className="wizard-section">
@@ -147,50 +244,58 @@ export default function ConfigurationWizard({ onStart }) {
           /* ── File upload ── */
           <div className={`upload-row ${inputType === 'both' ? 'upload-row--dual' : ''}`}>
             {(inputType === 'codebase' || inputType === 'both') && (
-              <label
-                className={`drop-zone ${file ? 'drop-zone--filled' : ''} ${dragging === 'code' ? 'drop-zone--drag' : ''}`}
-                ref={codeDropRef}
-                onDragOver={e => { e.preventDefault(); setDragging('code'); }}
-                onDragLeave={() => setDragging(null)}
-                onDrop={e => handleDrop(e, 'code')}
-              >
-                <input type="file" accept=".zip,.py,.js,.ts" onChange={e => e.target.files?.[0] && setFile(e.target.files[0])} className="drop-zone__input" />
-                <div className={`drop-zone__icon ${file ? 'drop-zone__icon--filled' : ''}`}>
-                  {file ? <CheckCircle2 size={28} /> : <UploadCloud size={28} />}
-                </div>
-                <div className="drop-zone__label">{file ? file.name : 'Codebase ZIP'}</div>
-                <div className="drop-zone__hint">{file ? 'Click to replace' : 'Drop or click · .zip / .py / .js / .ts'}</div>
-              </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <label
+                  className={`drop-zone ${file ? 'drop-zone--filled' : ''} ${dragging === 'code' ? 'drop-zone--drag' : ''} ${fileError ? 'drop-zone--error' : ''}`}
+                  ref={codeDropRef}
+                  onDragOver={e => { e.preventDefault(); setDragging('code'); }}
+                  onDragLeave={() => setDragging(null)}
+                  onDrop={e => handleDrop(e, 'code')}
+                >
+                  <input type="file" accept=".zip,.py,.js,.ts,.java,.go,.rb,.php,.cs,.cpp,.c,.h" onChange={e => handleFileChange(e.target.files?.[0], 'code')} className="drop-zone__input" />
+                  <div className={`drop-zone__icon ${file ? 'drop-zone__icon--filled' : ''} ${fileError ? 'drop-zone__icon--error' : ''}`}>
+                    {file ? <CheckCircle2 size={28} /> : <UploadCloud size={28} />}
+                  </div>
+                  <div className="drop-zone__label">{file ? file.name : 'Codebase File'}</div>
+                  <div className="drop-zone__hint">{file ? 'Click to replace' : 'Drop or click · .zip / .js / .py / etc'}</div>
+                </label>
+                {file && (
+                  <button className="remove-file-btn" onClick={() => { setFile(null); setFileError(''); }}>× Remove File</button>
+                )}
+                {fileError && <div className="inline-file-error">{fileError}</div>}
+              </div>
             )}
 
             {(inputType === 'database' || inputType === 'both') && (
-              <label
-                className={`drop-zone ${(inputType === 'both' ? schemaFile : file) ? 'drop-zone--filled' : ''} ${dragging === 'schema' ? 'drop-zone--drag' : ''}`}
-                ref={schemaDropRef}
-                onDragOver={e => { e.preventDefault(); setDragging('schema'); }}
-                onDragLeave={() => setDragging(null)}
-                onDrop={e => handleDrop(e, inputType === 'both' ? 'schema' : 'code')}
-              >
-                <input
-                  type="file"
-                  accept=".zip,.sql,.json,.prisma"
-                  onChange={e => {
-                    if (!e.target.files?.[0]) return;
-                    if (inputType === 'both') setSchemaFile(e.target.files[0]);
-                    else setFile(e.target.files[0]);
-                  }}
-                  className="drop-zone__input"
-                />
-                <div className={`drop-zone__icon ${(inputType === 'both' ? schemaFile : file) ? 'drop-zone__icon--filled' : ''}`}>
-                  {(inputType === 'both' ? schemaFile : file) ? <CheckCircle2 size={28} /> : <Database size={28} />}
-                </div>
-                <div className="drop-zone__label">
-                  {(inputType === 'both' ? schemaFile : file) ? (inputType === 'both' ? schemaFile.name : file.name) : 'Schema ZIP / SQL / Prisma / JSON'}
-                </div>
-                <div className="drop-zone__hint">
-                  {(inputType === 'both' ? schemaFile : file) ? 'Click to replace' : 'Drop or click · .zip / .sql / .json / .prisma'}
-                </div>
-              </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <label
+                  className={`drop-zone ${(inputType === 'both' ? schemaFile : file) ? 'drop-zone--filled' : ''} ${dragging === 'schema' ? 'drop-zone--drag' : ''} ${(inputType === 'both' ? schemaError : fileError) ? 'drop-zone--error' : ''}`}
+                  ref={schemaDropRef}
+                  onDragOver={e => { e.preventDefault(); setDragging('schema'); }}
+                  onDragLeave={() => setDragging(null)}
+                  onDrop={e => handleDrop(e, inputType === 'both' ? 'schema' : 'schema')}
+                >
+                  <input
+                    type="file"
+                    accept=".zip,.sql,.json,.prisma,.ddl"
+                    onChange={e => handleFileChange(e.target.files?.[0], inputType === 'both' ? 'schema' : 'schema')}
+                    className="drop-zone__input"
+                  />
+                  <div className={`drop-zone__icon ${(inputType === 'both' ? schemaFile : file) ? 'drop-zone__icon--filled' : ''} ${(inputType === 'both' ? schemaError : fileError) ? 'drop-zone__icon--error' : ''}`}>
+                    {(inputType === 'both' ? schemaFile : file) ? <CheckCircle2 size={28} /> : <Database size={28} />}
+                  </div>
+                  <div className="drop-zone__label">
+                    {(inputType === 'both' ? schemaFile : file) ? (inputType === 'both' ? schemaFile.name : file.name) : 'Schema / DB File'}
+                  </div>
+                  <div className="drop-zone__hint">
+                    {(inputType === 'both' ? schemaFile : file) ? 'Click to replace' : 'Drop or click · .zip / .sql / .json / .prisma'}
+                  </div>
+                </label>
+                {(inputType === 'both' ? schemaFile : file) && (
+                  <button className="remove-file-btn" onClick={() => { inputType === 'both' ? (setSchemaFile(null), setSchemaError('')) : (setFile(null), setFileError('')); }}>× Remove File</button>
+                )}
+                {(inputType === 'both' ? schemaError : fileError) && <div className="inline-file-error">{inputType === 'both' ? schemaError : fileError}</div>}
+              </div>
             )}
           </div>
         )}
@@ -232,15 +337,24 @@ export default function ConfigurationWizard({ onStart }) {
       </section>
 
       {/* ── Launch ── */}
-      <button
-        className={`launch-btn ${isReady() ? 'launch-btn--ready' : 'launch-btn--disabled'}`}
-        onClick={handleStart}
-        disabled={!isReady()}
-      >
-        <Play size={18} />
-        {inputType === 'url' ? 'Launch URL Scan' : 'Initialize Testing Protocol'}
-        {isReady() && <span className="launch-btn__glow" />}
-      </button>
+      <div className="wizard-footer-actions">
+        <button
+          className="save-template-btn"
+          onClick={handleSaveTemplate}
+          title="Save current config as template"
+        >
+          <Save size={16} /> Save as Template
+        </button>
+        <button
+          className={`launch-btn ${isReady() ? 'launch-btn--ready' : 'launch-btn--disabled'}`}
+          onClick={handleStart}
+          disabled={!isReady()}
+        >
+          <Play size={18} />
+          {inputType === 'url' ? 'Launch URL Scan' : 'Initialize Testing Protocol'}
+          {isReady() && <span className="launch-btn__glow" />}
+        </button>
+      </div>
     </div>
   );
 }

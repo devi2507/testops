@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { User, Mail, Building2, Save, ShieldCheck, Activity, Calendar, LogOut, CheckCircle, Users, UserPlus, Share2 } from 'lucide-react';
+import { User, Mail, Building2, Save, ShieldCheck, Activity, Calendar, LogOut, CheckCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import BackButton from '../components/BackButton';
 import api from '../services/api';
+import { isCompleted } from '../services/scanUtils';
 import '../styles/profilePage.css';
 
 export default function ProfilePage() {
@@ -12,21 +13,13 @@ export default function ProfilePage() {
   const [form, setForm]         = useState({ name: user?.name || '', organization: user?.organization || '' });
   const [saved, setSaved]       = useState(false);
   const [stats, setStats]       = useState({ total: 0, completed: 0, highRisk: 0, successRate: 0 });
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [members, setMembers] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem('testpilot_team_members') || '[]');
-    } catch {
-      return [];
-    }
-  });
 
   useEffect(() => {
     api.getHistory().then(history => {
       const total     = history.length;
-      const completed = history.filter(h => h.grade).length;
-      const highRisk  = history.filter(h => h.grade && ['D','F'].includes(h.grade[0])).length;
-      const good      = history.filter(h => h.grade && ['A','B'].includes(h.grade[0])).length;
+      const completed = history.filter(h => isCompleted(h)).length;
+      const highRisk  = history.filter(h => isCompleted(h) && ['D','F'].includes((h.grade || '')[0])).length;
+      const good      = history.filter(h => isCompleted(h) && (h.grade || '')[0] === 'A').length;
       setStats({
         total,
         completed,
@@ -45,23 +38,6 @@ export default function ProfilePage() {
   };
 
   const set = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }));
-
-  const inviteMember = (e) => {
-    e.preventDefault();
-    if (!inviteEmail.trim()) return;
-    const next = [
-      ...members,
-      {
-        email: inviteEmail.trim(),
-        name: inviteEmail.split('@')[0],
-        role: 'Viewer',
-        status: 'Invited',
-      },
-    ];
-    localStorage.setItem('testpilot_team_members', JSON.stringify(next));
-    setMembers(next);
-    setInviteEmail('');
-  };
 
   const memberSince = user?.joinedAt
     ? new Date(user.joinedAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
@@ -187,73 +163,6 @@ export default function ProfilePage() {
               <span className="badge badge--accent">FastAPI · localhost:8000</span>
             </div>
           </div>
-        </div>
-      </div>
-
-      <div className="team-workspace glass-card">
-        <div className="team-workspace__head">
-          <div>
-            <h2 className="profile-section-title">
-              <Users size={16} /> Team Workspace
-            </h2>
-            <p>Invite teammates and keep shared reports visible to the workspace.</p>
-          </div>
-          <span className="badge badge--accent">{members.length + 1} member{members.length === 0 ? '' : 's'}</span>
-        </div>
-
-        <form className="team-invite" onSubmit={inviteMember}>
-          <div className="pf-input-wrap">
-            <Mail size={15} className="pf-icon" />
-            <input
-              className="pf-input"
-              type="email"
-              placeholder="teammate@company.com"
-              value={inviteEmail}
-              onChange={e => setInviteEmail(e.target.value)}
-            />
-          </div>
-          <button className="team-invite__btn" type="submit">
-            <UserPlus size={15} /> Invite
-          </button>
-        </form>
-
-        <div className="team-grid">
-          <div className="team-member">
-            <div className="team-member__avatar">{user?.avatarInitial || 'U'}</div>
-            <div>
-              <strong>{user?.name || 'You'}</strong>
-              <span>Workspace Owner</span>
-            </div>
-            <span className="badge badge--success">Active</span>
-          </div>
-          {members.map((member, idx) => (
-            <div className="team-member" key={`${member.email}-${idx}`}>
-              <div className="team-member__avatar">{member.name?.[0]?.toUpperCase() || 'M'}</div>
-              <div>
-                <strong>{member.name}</strong>
-                <span>{member.email}</span>
-              </div>
-              <span className="badge badge--accent">{member.status}</span>
-            </div>
-          ))}
-        </div>
-
-        {members.length === 0 && (
-          <div className="team-empty">
-            <Users size={18} />
-            <div>
-              <strong>No teammates invited yet</strong>
-              <span>Invite a teammate to share report visibility in this workspace.</span>
-            </div>
-          </div>
-        )}
-
-        <div className="shared-reports">
-          <div>
-            <Share2 size={15} />
-            Shared reports
-          </div>
-          <span>{stats.completed} available to workspace members</span>
         </div>
       </div>
     </div>

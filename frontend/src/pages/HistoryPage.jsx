@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import {
   Search, Filter, Trash2, Eye, Download, RefreshCcw,
   Code, Database, Layers, Globe, Calendar, Bug,
-  ChevronLeft, ChevronRight, AlertTriangle, ShieldCheck, Plus
+  ChevronLeft, ChevronRight, AlertTriangle, ShieldCheck, Plus, ScanLine
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { useLocation, useNavigate } from 'react-router-dom';
 import BackButton from '../components/BackButton';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
+import { isCancelled, isCompleted, needsReview } from '../services/scanUtils';
 import '../styles/historyPage.css';
 
 const INPUT_ICON  = { codebase: Code, database: Database, both: Layers, url: Globe };
@@ -15,6 +17,8 @@ const INPUT_LABEL = { codebase: 'Codebase', database: 'Database', both: 'Full St
 
 const gradeColor = g => {
   if (!g) return 'var(--text-muted)';
+  const normalized = String(g).toLowerCase();
+  if (normalized.startsWith('cancel')) return 'var(--text-muted)';
   const l = g[0];
   if (l === 'A') return 'var(--success)';
   if (l === 'B') return 'var(--info)';
@@ -61,6 +65,8 @@ const PAGE_SIZE = 10;
 
 export default function HistoryPage({ onNavigate }) {
   const toast = useToast();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [history, setHistory]     = useState([]);
   const [loading, setLoading]     = useState(true);
   const [search, setSearch]       = useState('');
@@ -81,27 +87,36 @@ export default function HistoryPage({ onNavigate }) {
 
   useEffect(() => { load(); }, []);
 
-  // ── Filtering ──
+  const viewMode = new URLSearchParams(location.search).get('view');
+  
+  const filterByView = (scan) => {
+    if (viewMode === 'completed') return isCompleted(scan);
+    if (viewMode === 'review') return needsReview(scan);
+    if (viewMode === 'cancelled') return isCancelled(scan);
+    return true;
+  };
+
   const filtered = history.filter(h => {
     const matchSearch = !search || (h.target||'').toLowerCase().includes(search.toLowerCase());
     const matchType   = typeFilter === 'all' || h.inputType === typeFilter;
     const matchGrade  = gradeFilter === 'all' || (h.grade||'?')[0] === gradeFilter;
-    return matchSearch && matchType && matchGrade;
+    return matchSearch && matchType && matchGrade && filterByView(h);
   }).sort((a, b) => {
     if (sortBy === 'score') return (b.securityScore || 0) - (a.securityScore || 0);
     if (sortBy === 'issues') return (b.bugsFound || 0) - (a.bugsFound || 0);
     if (sortBy === 'oldest') return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
     return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
   });
-
   const totalPages  = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage    = Math.min(page, totalPages);
   const pageItems   = filtered.slice((safePage-1)*PAGE_SIZE, safePage*PAGE_SIZE);
   const avgScore    = history.length
     ? Math.round(history.reduce((sum, scan) => sum + (scan.securityScore || 0), 0) / history.length)
     : 0;
-  const riskCount   = history.filter(scan => (scan.bugsFound || 0) > 0 || ['D', 'F'].includes((scan.grade || '')[0])).length;
+  const completedCount = history.filter(scan => isCompleted(scan)).length;
+  const riskCount   = history.filter(scan => needsReview(scan)).length;
   const latestScan  = history[0]?.createdAt ? formatDate(history[0].createdAt) : 'No activity yet';
+  const navigateToReport = (scanId) => navigate(`/reports/${scanId}`);
 
   const handleClear = async () => {
     if (!window.confirm('Delete all scan history? This cannot be undone.')) return;
@@ -148,21 +163,21 @@ export default function HistoryPage({ onNavigate }) {
       </div>
 
       <div className="hist-summary-grid">
-        <div className="hist-summary-card">
-          <div className="hist-summary-card__icon hist-summary-card__icon--blue"><ShieldCheck size={17} /></div>
+        <div className="hist-summary-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/history')}>
+          <div className="hist-summary-card__icon hist-summary-card__icon--blue"><ScanLine size={17} /></div>
           <div>
             <span>Total Scans</span>
             <strong>{history.length}</strong>
           </div>
         </div>
-        <div className="hist-summary-card">
-          <div className="hist-summary-card__icon hist-summary-card__icon--green"><ActivityIcon /></div>
+        <div className="hist-summary-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/history?view=completed')}>
+          <div className="hist-summary-card__icon hist-summary-card__icon--green"><ShieldCheck size={17} /></div>
           <div>
-            <span>Average Score</span>
-            <strong>{avgScore || '-'}</strong>
+            <span>Completed</span>
+            <strong>{completedCount}</strong>
           </div>
         </div>
-        <div className="hist-summary-card">
+        <div className="hist-summary-card" style={{ cursor: 'pointer' }} onClick={() => navigate('/history?view=review')}>
           <div className="hist-summary-card__icon hist-summary-card__icon--amber"><AlertTriangle size={17} /></div>
           <div>
             <span>Needs Review</span>
@@ -261,7 +276,7 @@ export default function HistoryPage({ onNavigate }) {
                 const bugColor = bugs > 5 ? 'var(--error)' : bugs > 0 ? 'var(--warning)' : 'var(--success)';
 
                 return (
-                  <tr key={scan.id}>
+                  <tr key={scan.id} onClick={() => navigateToReport(scan.id)} style={{ cursor: 'pointer' }}>
                     <td>
                       <div className="ht-target">
                         <div className="ht-target__icon">
@@ -276,7 +291,9 @@ export default function HistoryPage({ onNavigate }) {
                     </td>
                     <td><span className="badge badge--accent">{label}</span></td>
                     <td>
-                      <span className="ht-grade" style={{ color: gc }}>{scan.grade || '—'}</span>
+                      <span className="ht-grade" style={{ color: gc }}>
+                        {scan.status === 'cancelled' ? 'Cancelled' : scan.grade || '—'}
+                      </span>
                     </td>
                     <td>
                       <div className="ht-score-wrap">
@@ -302,23 +319,16 @@ export default function HistoryPage({ onNavigate }) {
                         <button
                           className="ht-action-btn"
                           title="Quick Preview"
-                          onClick={() => openPreview(scan)}
+                          onClick={(e) => { e.stopPropagation(); openPreview(scan); }}
                         >
                           <Eye size={13} />
                         </button>
                         <button
                           className="ht-action-btn"
                           title="Download PDF"
-                          onClick={() => quickExport(scan)}
+                          onClick={(e) => { e.stopPropagation(); quickExport(scan); }}
                         >
                           <Download size={13} />
-                        </button>
-                        <button
-                          className="ht-action-btn ht-action-btn--primary"
-                          title="Re-run Scan"
-                          onClick={() => onNavigate('scan')}
-                        >
-                          <RefreshCcw size={13} />
                         </button>
                       </div>
                     </td>

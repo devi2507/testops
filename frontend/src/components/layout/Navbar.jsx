@@ -1,5 +1,5 @@
 import React from 'react';
-import { Bell, Activity, Sun, Moon } from 'lucide-react';
+import { Activity, Sun, Moon } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 
@@ -43,11 +43,6 @@ export default function Navbar({ currentPage, activeScans = 0 }) {
           title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
         >
           {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
-        </button>
-
-        {/* Notifications */}
-        <button className="navbar-icon-btn" title="Notifications">
-          <Bell size={15} />
         </button>
 
         {/* Avatar */}

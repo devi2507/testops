@@ -34,6 +34,7 @@ async def save_audit(
     selected_tests: list,
     target: str,
     result: "TestResult",
+    status: str = "completed"
 ) -> None:
     """Upsert a completed audit into MongoDB."""
     try:
@@ -47,16 +48,97 @@ async def save_audit(
             "securityScore": result.securityScore,
             "bugsFound":     result.bugsFound,
             "results":       result.model_dump(),
+            "status":        status,
         }
         await audits_col.replace_one({"_id": test_id}, doc, upsert=True)
     except Exception as exc:
         print(f"[MongoDB] Failed to save audit {test_id}: {exc}")
 
 
+# ── Email utility function ──────────────────────────────────────────────
+async def send_invitation_email(recipient_email: str, inviter_name: str, workspace_name: str):
+    """Send team invitation email to invited member"""
+    if not SEND_EMAILS:
+        print(f"[Email] Email not configured. Skipping invitation to {recipient_email}")
+        return
+    
+    try:
+        subject = f"You've been invited to join {workspace_name or 'TestOps'} workspace"
+        
+        body_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
+        .card {{ background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .header {{ color: #1a1a2e; margin-bottom: 20px; }}
+        .content {{ color: #555; line-height: 1.6; margin-bottom: 30px; }}
+        .cta-button {{ display: inline-block; background: #6366f1; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; margin: 20px 0; }}
+        .footer {{ color: #999; font-size: 12px; margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1 class="header">🔐 You're invited to join TestOps!</h1>
+            <div class="content">
+                <p>Hi there,</p>
+                <p><strong>{inviter_name or 'A team member'}</strong> has invited you to join their workspace on <strong>TestOps</strong> — a security audit and testing platform.</p>
+                <p>You can now:</p>
+                <ul>
+                    <li>View shared security reports and audit findings</li>
+                    <li>Collaborate on scan results with team members</li>
+                    <li>Track security issues and remediation progress</li>
+                </ul>
+                <p>Click the button below to accept the invitation and join the workspace:</p>
+                <a href="{APP_URL}" class="cta-button">Join Workspace</a>
+                <p>If the button doesn't work, copy and paste this link into your browser:</p>
+                <p><code>{APP_URL}</code></p>
+            </div>
+            <div class="footer">
+                <p>This is an automated message from TestOps. Please don't reply to this email.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+        
+        message = MIMEMultipart("alternative")
+        message["Subject"] = subject
+        message["From"] = EMAIL_SENDER
+        message["To"] = recipient_email
+        
+        part = MIMEText(body_html, "html")
+        message.attach(part)
+        
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(EMAIL_SENDER, recipient_email, message.as_string())
+        
+        print(f"[Email] Invitation sent to {recipient_email}")
+        
+        # Log to database
+        await invites_col.insert_one({
+            "_id": str(uuid.uuid4()),
+            "recipientEmail": recipient_email,
+            "inviterName": inviter_name,
+            "workspaceName": workspace_name,
+            "sentAt": datetime.now(timezone.utc),
+            "status": "sent",
+        })
+    except Exception as e:
+        print(f"[Email] Failed to send invitation to {recipient_email}: {e}")
+
+
 app = FastAPI(title="TestOps Platform", version="2.0")
 
-# ── CORS Configuration ─────────────────────────────────────────
-# For development: allow all origins. For production: set ALLOWED_ORIGINS env var
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "message": "Backend is alive"}
+
 allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 allowed_origins = [origin.strip() for origin in allowed_origins if origin.strip()]
 
@@ -331,125 +413,6 @@ def allowed_types_for(selected_tests: list[str]) -> set[str]:
         result.update(TYPE_FILTER_MAP.get(t, []))
     return result or {"Code Quality", "Logic Error"}  
 
-@app.post("/api/assistant/chat", response_model=AssistantChatResponse)
-async def assistant_chat(payload: AssistantChatRequest):
-    """
-    General-purpose AI Security/Testing assistant with optional report awareness.
-    Keeps frontend architecture unchanged: the UI calls this endpoint and sends a rolling message history.
-    """
-    groq_key = os.environ.get("GROQ_API_KEY", "")
-    if not groq_key or groq_key == "your_groq_api_key_here":
-        # Log clearly so operators see misconfiguration
-        print("[AssistantChat] GROQ_API_KEY not configured in environment or backend/.env")
-        return AssistantChatResponse(
-            answer="The AI assistant backend is not configured on this server (missing GROQ_API_KEY). "
-                   "Ask your administrator to set the Groq API key in backend/.env.",
-            isUnrelated=False,
-        )
-
-    # Defensive: limit size (frontend should already keep it small)
-    history = (payload.messages or [])[-16:]
-    report_ctx = payload.reportContext or None
-
-    system_prompt = (
-        "You are TestOps Engineering Assistant — an AI assistant that behaves like:\n"
-        "- a senior cybersecurity engineer,\n"
-        "- a QA / software testing expert,\n"
-        "- and a DevSecOps-focused engineering partner.\n"
-        "\n"
-        "You are specialized in:\n"
-        "- Application & infrastructure security (TLS, JWT, OAuth, OWASP Top 10, CORS/CSRF, authn vs authz, secrets management, encryption at rest/in transit)\n"
-        "- Software testing (unit, integration, e2e, test strategy, CI test pipelines, debugging failing or flaky tests)\n"
-        "- Backend and API design (REST, GraphQL, microservices, versioning, rate limiting, idempotency)\n"
-        "- Frontend concepts (SPAs, browser security model, CORS, cookies, local/session storage)\n"
-        "- Databases and SQL (foreign keys, normalization, indexing, transactions, isolation levels, ORMs)\n"
-        "- DevOps / DevSecOps (CI/CD, static/dynamic analysis, SBOM, secrets scanning, shift-left security)\n"
-        "- General debugging & modern programming practices.\n"
-        "\n"
-        "You should naturally and directly answer educational technical questions such as:\n"
-        "- \"What is a hardcoded secret key?\"\n"
-        "- \"What is a foreign key?\"\n"
-        "- \"What is normalization?\"\n"
-        "- \"Difference between REST and GraphQL?\"\n"
-        "- \"What is CORS?\" / \"Explain TLS\" / \"Explain JWT\"\n"
-        "- \"What is dependency injection?\" / \"What is Docker?\"\n"
-        "For these, explain what it is, why it matters, the risks or trade-offs, and give a small concrete example plus safer alternatives when relevant.\n"
-        "\n"
-        "Report awareness:\n"
-        "- If the user's question is clearly about the current scan/report (specific findings, severities, root causes, reproductions, recommended fixes), use the provided report context to answer precisely.\n"
-        "- If it is NOT about the report, answer normally using your general engineering knowledge (do NOT force the report into the answer).\n"
-        "\n"
-        "Style guidelines:\n"
-        "- Explain acronyms on first use (e.g., TLS = Transport Layer Security).\n"
-        "- Be concise but informative. Give clear definitions, explain risks/impact, and show a short example or scenario when helpful.\n"
-        "- Sound natural and intelligent; avoid boilerplate like \"please check the report\" unless it truly adds value.\n"
-        "\n"
-        "Unrelated questions:\n"
-        "- ONLY treat a question as unrelated if it is obviously outside software / security / IT / engineering (e.g., cooking recipes, movie rankings, celebrity gossip).\n"
-        "- In those rare cases, you may set isUnrelated=true and your answer should briefly redirect the user back to software/security/testing topics.\n"
-        "- Normal questions about security, testing, authentication, APIs, vulnerabilities, encryption, DevOps, backend/frontend, OWASP, databases, CI/CD, or debugging are ALWAYS considered in-scope and should be answered directly.\n"
-        "\n"
-        "Return ONLY valid JSON with this shape:\n"
-        "{ \"answer\": \"<string>\", \"isUnrelated\": <true|false> }\n"
-        "No markdown, no code fences, no extra keys."
-    )
-
-    msgs = [{"role": "system", "content": system_prompt}]
-    if report_ctx:
-        # Keep report context compact; the frontend should send only essentials.
-        msgs.append({
-            "role": "system",
-            "content": "Current scan/report context (use ONLY when relevant):\n" + json.dumps(report_ctx, ensure_ascii=False)[:12000],
-        })
-
-    for m in history:
-        role = (m.role or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = (m.content or "").strip()
-        if not content:
-            continue
-        msgs.append({"role": role, "content": content[:4000]})
-
-    client = Groq(api_key=groq_key)
-
-    last_error: Optional[Exception] = None
-    raw: str = ""
-
-    for attempt in range(2):  # initial try + one retry
-        try:
-            print(f"[AssistantChat] Sending request to Groq (attempt {attempt + 1})")
-            resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=msgs,
-                temperature=0.2,
-                max_tokens=900,
-            )
-            raw = (resp.choices[0].message.content or "").strip()
-            break
-        except Exception as exc:
-            last_error = exc
-            print(f"[AssistantChat] Groq API error on attempt {attempt + 1}: {exc}")
-            # small delay before retry to avoid hammering
-            time.sleep(0.4)
-
-    if not raw:
-        # After retries we still have no content; return a graceful answer instead of HTTP 502
-        msg = "The AI assistant could not be reached right now. Please try again in a moment."
-        if last_error:
-            print(f"[AssistantChat] Giving up after retries. Last error: {last_error}")
-        return AssistantChatResponse(answer=msg, isUnrelated=False)
-
-    obj = extract_assistant_json_robust(raw)
-
-    answer = str(obj.get("answer", "")).strip()
-    is_unrelated = bool(obj.get("isUnrelated", False))
-    if not answer:
-        print("[AssistantChat] Parsed response had empty 'answer' field; falling back to raw content.")
-        answer = raw
-
-    return AssistantChatResponse(answer=answer, isUnrelated=is_unrelated)
-
 @app.post("/api/test/start")
 async def start_test(
     background_tasks: BackgroundTasks,
@@ -517,6 +480,17 @@ async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: 
         if pct is not None:
             active_tests[test_id]["progress"] = pct
 
+    def is_cancelled() -> bool:
+        return active_tests.get(test_id, {}).get("status") == "cancelled"
+
+    def abort_if_cancelled() -> bool:
+        if is_cancelled():
+            if not active_tests[test_id]["logs"] or active_tests[test_id]["logs"][-1] != "Scan cancelled by user.":
+                active_tests[test_id]["logs"].append("Scan cancelled by user.")
+            active_tests[test_id]["status"] = "cancelled"
+            return True
+        return False
+
     try:
         input_type     = active_tests[test_id]["config"]["inputType"]
         selected_tests = active_tests[test_id]["config"]["selectedTests"]
@@ -524,6 +498,8 @@ async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: 
         
         log("Inspecting uploaded archive...", 10)
         await asyncio.sleep(0.5)
+        if abort_if_cancelled():
+            return
 
         code_contents = []
 
@@ -557,6 +533,8 @@ async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: 
 
         log(f"Found {len(code_contents)} file(s). Building analysis context...", 30)
         await asyncio.sleep(0.4)
+        if abort_if_cancelled():
+            return
 
         all_code      = "\n".join(code_contents)[:20000]   # ~5k tokens — ample for 70B model
         active_suites = [TEST_FOCUS[t] for t in selected_tests if t in TEST_FOCUS]
@@ -637,8 +615,8 @@ async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: 
 
         log(f"Running {len(active_suites)} test suite(s): {', '.join(selected_tests)}", 50)
         await asyncio.sleep(0.4)
-
-    
+        if abort_if_cancelled():
+            return
         prompt = f"""You are an expert software quality engineer performing a targeted audit.
 
 Your audit scope for this run is strictly limited to the following test categories:
@@ -691,6 +669,8 @@ Rules:
        
         log("Sending to Groq AI (llama-3.3-70b-versatile)...", 65)
         await asyncio.sleep(0.3)
+        if abort_if_cancelled():
+            return
 
         groq_key = os.environ.get("GROQ_API_KEY", "")
         if not groq_key or groq_key == "your_groq_api_key_here":
@@ -720,6 +700,8 @@ Rules:
         raw = response.choices[0].message.content or ""
         log("Parsing AI response...", 85)
         await asyncio.sleep(0.3)
+        if abort_if_cancelled():
+            return
 
         result_dict = extract_json_robust(raw)
 
@@ -768,6 +750,8 @@ Rules:
         active_tests[test_id]["status"] = "completed"
 
     except Exception as exc:
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
         log(f"ERROR: {exc}", 100)
         active_tests[test_id]["status"] = "completed"
         test_results[test_id] = TestResult(
@@ -802,11 +786,70 @@ async def get_progress(test_id: str):
                 "latest_log": t["logs"][-1] if t["logs"] else "",
             })
             yield f"data: {payload}\n\n"
-            if t["status"] == "completed":
+            if t["status"] in {"completed", "cancelled"}:
                 break
             await asyncio.sleep(1)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+@app.post("/cancel-scan/{scan_id}")
+async def cancel_test(scan_id: str):
+    test_id = scan_id
+    if test_id not in active_tests:
+        raise HTTPException(status_code=404, detail="Test not found")
+    if active_tests[test_id]["status"] == "completed":
+        return {"status": "completed"}
+    active_tests[test_id]["status"] = "cancelled"
+    if not active_tests[test_id]["logs"] or active_tests[test_id]["logs"][-1] != "Scan cancelled by user.":
+        active_tests[test_id]["logs"].append("Scan cancelled by user.")
+    
+    t = active_tests[test_id]
+    target_label = t.get("config", {}).get("target", "uploaded file")
+    input_type = t.get("config", {}).get("inputType", "unknown")
+    selected_tests = t.get("config", {}).get("selectedTests", [])
+    
+    empty_result = TestResult(
+        grade="Cancelled",
+        securityScore=0,
+        bugsFound=0,
+        bugs=[]
+    )
+    await save_audit(test_id, input_type, selected_tests, target_label, empty_result, status="cancelled")
+    
+    return {"status": "cancelled"}
+
+
+# ══ Team Workspace Endpoints ═════════════════════════════════════════════
+@app.post("/api/team/invite")
+async def invite_team_member(
+    background_tasks: BackgroundTasks,
+    email: str = Form(...),
+    inviterName: str = Form(...),
+    workspaceName: str = Form(...),
+):
+    """Send invitation email to team member"""
+    if not email or not email.strip():
+        raise HTTPException(status_code=400, detail="Email is required")
+    
+    email = email.strip().lower()
+    
+    # Validate email format
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    
+    # Send email in background
+    background_tasks.add_task(
+        send_invitation_email,
+        email,
+        inviterName or "A team member",
+        workspaceName or "TestOps"
+    )
+    
+    return {
+        "success": True,
+        "message": f"Invitation sent to {email}",
+        "email": email,
+    }
 
 
 @app.get("/api/test/results/{test_id}", response_model=TestResult)
@@ -839,6 +882,7 @@ async def get_history():
             "grade":         doc.get("grade"),
             "securityScore": doc.get("securityScore"),
             "bugsFound":     doc.get("bugsFound"),
+            "status":        doc.get("status", "completed"),
         })
     return history
 
@@ -908,6 +952,17 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
         if pct is not None:
             active_tests[test_id]["progress"] = pct
 
+    def is_cancelled() -> bool:
+        return active_tests.get(test_id, {}).get("status") == "cancelled"
+
+    def abort_if_cancelled() -> bool:
+        if is_cancelled():
+            if not active_tests[test_id]["logs"] or active_tests[test_id]["logs"][-1] != "Scan cancelled by user.":
+                active_tests[test_id]["logs"].append("Scan cancelled by user.")
+            active_tests[test_id]["status"] = "cancelled"
+            return True
+        return False
+
     # Ensure URL has scheme
     if not target_url.startswith(("http://", "https://")):
         target_url = "https://" + target_url
@@ -916,6 +971,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
     try:
         log(f"Connecting to {target_url}...", 10)
+        if abort_if_cancelled():
+            return
 
         headers_to_send = {
             "User-Agent": "TestOps-SecurityAudit/2.0 (automated scan)",
@@ -930,6 +987,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
             # ── Base request ──────────────────────────────────────────
             log("Fetching main page and response headers...", 18)
+            if abort_if_cancelled():
+                return
             resp = await client.get(target_url, headers=headers_to_send)
             resp_headers = dict(resp.headers)
             status_code  = resp.status_code
@@ -945,6 +1004,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
             # ── Security headers ──────────────────────────────────────
             log("Auditing security headers...", 28)
+            if abort_if_cancelled():
+                return
             security_headers_check = {
                 "Content-Security-Policy":   resp_headers.get("content-security-policy"),
                 "X-Frame-Options":           resp_headers.get("x-frame-options"),
@@ -959,6 +1020,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
             # ── Cookie security ────────────────────────────────────────
             log("Inspecting cookies...", 36)
+            if abort_if_cancelled():
+                return
             cookies_found = []
             for k, v in resp.cookies.items():
                 cookies_found.append({"name": k, "value_preview": v[:12] + "..." if len(v) > 12 else v})
@@ -974,6 +1037,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
             # ── CORS ─────────────────────────────────────────────────
             log("Checking CORS configuration...", 44)
+            if abort_if_cancelled():
+                return
             cors_resp = await client.options(
                 target_url,
                 headers={**headers_to_send, "Origin": "https://evil-attacker.com",
@@ -988,6 +1053,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
             # ── Exposed sensitive paths ────────────────────────────────
             log("Probing sensitive paths...", 54)
+            if abort_if_cancelled():
+                return
             base = f"{resp.url.scheme}://{resp.url.host}"
             sensitive_paths = [
                 "/.env", "/.git/config", "/robots.txt", "/swagger",
@@ -1006,6 +1073,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
             # ── Rate limiting ─────────────────────────────────────────
             log("Testing rate limiting...", 64)
+            if abort_if_cancelled():
+                return
             login_paths = ["/login", "/api/login", "/api/auth/login", "/auth/login", "/signin"]
             rate_results = {}
             for lp in login_paths:
@@ -1026,6 +1095,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
         # ── SSL check (sync, separate context) ──────────────────────
         log("Checking SSL/TLS certificate...", 72)
+        if abort_if_cancelled():
+            return
         import socket
         from urllib.parse import urlparse
         ssl_info = {}
@@ -1058,6 +1129,8 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
 
         # ── Build AI prompt ──────────────────────────────────────────
         log("Sending findings to AI for analysis...", 80)
+        if abort_if_cancelled():
+            return
 
         scope_focus = "\n".join(
             f"- {URL_SUITE_FOCUS[t]}" for t in selected_tests if t in URL_SUITE_FOCUS
@@ -1150,6 +1223,8 @@ Rules:
         active_tests[test_id]["status"] = "completed"
 
     except Exception as exc:
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
         log(f"ERROR: {exc}", 100)
         active_tests[test_id]["status"] = "completed"
         test_results[test_id] = TestResult(
@@ -1162,3 +1237,311 @@ Rules:
                 recommendation="Verify the target URL is correct and publicly accessible.",
             )],
         )
+
+# ── TEMPLATES ─────────────────────────────────────────────────────────────
+class Template(BaseModel):
+    id: str
+    name: str
+    inputType: str
+    selectedTests: list[str]
+    targetUrl: str = None
+
+@app.get("/api/templates")
+async def get_templates():
+    try:
+        cursor = db.templates.find({}, {"_id": 0}).sort("createdAt", -1)
+        return await cursor.to_list(length=100)
+    except Exception as e:
+        print(f"Error fetching templates: {e}")
+        return []
+
+@app.post("/api/templates")
+async def create_template(template: Template):
+    try:
+        doc = template.dict()
+        doc["createdAt"] = datetime.utcnow().isoformat()
+        await db.templates.insert_one(doc)
+        return {"status": "ok", "template": doc}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/templates/{template_id}")
+async def delete_template(template_id: str):
+    try:
+        await db.templates.delete_one({"id": template_id})
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ══ AI Security Assistant ════════════════════════════════════════════════
+
+ASSISTANT_SYSTEM_PROMPT = """You are the AI Security Assistant built into TestPilot AI — a professional security audit and testing platform. You behave like a senior security engineer and product expert combined.
+
+## CORE BEHAVIOUR
+
+**Response length must match question complexity:**
+- Simple/definition question ("What is XSS?") → 2–4 sentences max, no headers
+- Moderate question ("How does JWT work?") → short paragraphs + 1 code example
+- Complex/implementation question ("How do I implement rate limiting?") → structured answer with 1 focused code example
+- Never dump textbook-length responses. Stop when the answer is complete.
+- Never repeat the same point in different words.
+- Never give multiple code examples for the same concept — pick the best one.
+
+**Formatting rules:**
+- Use `##` headers only for multi-section answers
+- Use bullet points for lists of 3+ items
+- Use fenced code blocks with language tag for all code
+- Short paragraphs (2–3 sentences max each)
+- Bold only key terms, not entire sentences
+
+**Quality rules:**
+- Always be specific — name the exact function, header, parameter, or pattern
+- For vulnerabilities: what it is → why dangerous → fix (with code)
+- For "how to" questions: direct steps + 1 code example
+- Never say "I cannot help" for any topic in your domains
+- Never expose internal errors or model details
+
+---
+
+## PLATFORM KNOWLEDGE (TestPilot AI)
+
+You know this platform inside-out. Answer usage questions accurately:
+
+**Scan types:** Codebase (ZIP upload), Database Schema (SQL/Prisma/JSON), Full Stack (both), Live URL Scan
+
+**How to run a scan:**
+1. Go to New Scan (sidebar)
+2. Select input type → upload file or enter URL
+3. Select test suites → click Next → Launch
+
+**Test suites available:**
+- Codebase: Unit Testing, Integration Testing, Security Analysis
+- Database: Schema Validation, Query Optimization, Referential Integrity
+- Full Stack: End-to-End Mapping, Full Stack Security, Data Flow Security
+- URL: Security Headers, SSL/TLS, Access Control, Cookie Security, CORS Config, Info Disclosure, Rate Limiting
+
+**Grading system (score → grade):**
+- 90–100 → A+, 80–89 → A, 70–79 → B, 60–69 → C, 40–59 → D, 0–39 → F
+- Score starts at 100, deducts: HIGH bug = -15, MEDIUM = -7, LOW = -3
+
+**"Needs Review"** = completed scans with grade B or below (not A/A+, not cancelled)
+
+**How to download a report:** Open any scan from History or Reports → click "Export PDF" button in the report header
+
+**How to rerun a scan:** Go to New Scan → configure same settings → launch again (or use a saved template)
+
+**Templates:** Save your test suite selection as a reusable template from the Test Suites step → "Save as template" button. Apply templates from Step 1 of New Scan.
+
+**How to cancel a scan:** During an active scan, click the "Cancel Scan" button in the progress console
+
+**Why a scan might fail:** Missing/invalid GROQ_API_KEY in backend .env, unsupported file format, empty ZIP archive, or backend not running
+
+**Scan History:** Shows all past scans with grade, score, bug count. Click any row to open the full report.
+
+**Reports page:** Lists all completed scans as cards. Click a card to open the full detailed report with vulnerability breakdown.
+
+---
+
+## TECHNICAL EXPERTISE
+
+**Security:** OWASP Top 10, XSS, SQLi, CSRF, SSRF, RCE, IDOR, JWT attacks, OAuth misconfigs, TLS/SSL, CORS, CSP, security headers, cookie flags, brute force, rate limiting, secrets management, CVE/CVSS, VAPT methodology
+
+**Programming:** Python, JavaScript/TypeScript, Java, Go, C/C++, SQL, shell scripting, REST APIs, async patterns, input validation, output encoding
+
+**Databases:** MySQL, PostgreSQL, MongoDB, schema design, query optimization, indexing, transactions, ORM security
+
+**DevOps:** Docker security, CI/CD pipelines, Git secrets, Linux hardening, Nginx config, environment variables
+
+**Testing:** Unit, integration, API, UI testing, SAST/DAST, Playwright, Pytest, Jest
+
+---
+
+## SCAN REPORT CONTEXT
+
+If a scan report is provided below, use it as the source of truth. When the user asks about "my scan", "last scan", "recent scan", "vulnerabilities found", or "my report" — answer using ONLY the data provided. Do not invent or estimate values.
+"""
+
+# ── Intent classifier — determines response token budget ─────────────────
+def classify_intent(message: str) -> str:
+    """Route the question to a response-size category."""
+    msg = message.lower().strip()
+
+    # Platform help questions → concise
+    platform_keywords = [
+        "how to", "how do i", "where is", "where can i", "what is the",
+        "download", "export", "pdf", "rerun", "re-run", "cancel", "template",
+        "upload", "grade", "score", "needs review", "history", "report page",
+        "scan type", "what does", "what is a", "explain the grade",
+        "why did", "why is", "failed", "not working",
+    ]
+    if any(k in msg for k in platform_keywords):
+        return "platform"
+
+    # Simple definition questions → short
+    definition_keywords = [
+        "what is ", "what are ", "define ", "explain ", "meaning of",
+        "difference between", "vs ", "versus",
+    ]
+    if any(k in msg for k in definition_keywords) and len(msg) < 80:
+        return "definition"
+
+    # Scan/report analysis → medium
+    scan_keywords = [
+        "my scan", "last scan", "latest scan", "recent scan", "my report",
+        "vulnerabilities found", "bugs found", "what was found", "scan result",
+        "my grade", "my score", "fix this", "remediate",
+    ]
+    if any(k in msg for k in scan_keywords):
+        return "report"
+
+    # Implementation/how-to → medium with code
+    impl_keywords = [
+        "implement", "how to implement", "how to set up", "how to configure",
+        "write a", "create a", "build a", "example of", "show me",
+        "code for", "snippet", "sample",
+    ]
+    if any(k in msg for k in impl_keywords):
+        return "implementation"
+
+    # Default → standard
+    return "standard"
+
+
+# Token budgets per intent
+TOKEN_BUDGETS = {
+    "platform":       512,
+    "definition":     400,
+    "report":         800,
+    "implementation": 900,
+    "standard":       700,
+}
+
+
+class AssistantMessage(BaseModel):
+    role: str   # "user" | "assistant"
+    content: str
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalise_role(cls, v):
+        v = (v or "").strip().lower()
+        return "assistant" if v in {"ai", "bot", "system"} else v
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def ensure_str(cls, v):
+        return "" if v is None else str(v)
+
+class AssistantRequest(BaseModel):
+    messages: List[AssistantMessage]
+    reportContext: Optional[dict] = None
+    latestScan:    Optional[dict] = None   # real latest scan summary from history
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(req: AssistantRequest):
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if not groq_key or groq_key == "your_groq_api_key_here":
+        raise HTTPException(status_code=503, detail="AI assistant is not configured.")
+
+    # Determine intent from the last user message
+    last_user_msg = ""
+    for m in reversed(req.messages):
+        if m.role == "user" and m.content.strip():
+            last_user_msg = m.content.strip()
+            break
+
+    intent = classify_intent(last_user_msg)
+    max_tokens = TOKEN_BUDGETS.get(intent, 700)
+
+    # Build system prompt
+    system_content = ASSISTANT_SYSTEM_PROMPT
+
+    # Inject latest scan context (from frontend history fetch — always accurate)
+    if req.latestScan:
+        ls = req.latestScan
+        system_content += f"""
+
+## LATEST SCAN DATA (source of truth — use this for "last scan" / "recent scan" questions)
+- Target: {ls.get('target', 'unknown')}
+- Date: {ls.get('createdAt', 'unknown')}
+- Input type: {ls.get('inputType', 'unknown')}
+- Grade: {ls.get('grade', '?')}
+- Security score: {ls.get('securityScore', '?')}/100
+- Bugs found: {ls.get('bugsFound', 0)}
+- Status: {ls.get('status', 'completed')}
+- Test suites run: {', '.join(ls.get('selectedTests', []))}
+"""
+
+    # Inject open report context (when user is viewing a specific report)
+    if req.reportContext:
+        ctx = req.reportContext
+        score = ctx.get("securityScore") or ctx.get("score", "?")
+        grade = ctx.get("grade", "?")
+        bugs  = ctx.get("bugs", [])
+        target = ctx.get("target", "the scanned target")
+        bug_lines = "\n".join(
+            f"  - [{b.get('severity','?')}] {b.get('title','?')}: {b.get('reason','')}"
+            for b in bugs[:12]
+        )
+        system_content += f"""
+
+## CURRENTLY OPEN REPORT (user is viewing this report right now)
+- Target: {target}
+- Grade: {grade} | Score: {score}/100
+- Total issues: {len(bugs)}
+{bug_lines if bug_lines else '  No issues found.'}
+
+When the user asks about vulnerabilities, fixes, or their report — reference this data directly.
+"""
+
+    # Sanitise and trim message history (keep last 16 turns)
+    history = []
+    for m in req.messages[-32:]:
+        role = m.role if m.role in {"user", "assistant"} else "user"
+        content = (m.content or "").strip()
+        if content:
+            history.append({"role": role, "content": content})
+
+    if not history:
+        raise HTTPException(status_code=400, detail="No messages provided.")
+
+    # Retry logic: 2 attempts
+    last_error = None
+    for attempt in range(2):
+        try:
+            client = Groq(api_key=groq_key)
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": system_content},
+                    *history,
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            answer = (response.choices[0].message.content or "").strip()
+            if not answer:
+                raise ValueError("Empty response from model")
+            return {"answer": answer}
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(0.8)
+
+    # Both attempts failed — return a user-friendly message
+    err_str = str(last_error).lower()
+    print(f"[Assistant] Both attempts failed: {last_error}")
+
+    if "rate_limit" in err_str or "429" in err_str or "tokens per day" in err_str:
+        msg = (
+            "The AI assistant has hit its daily token limit on the free Groq tier. "
+            "It will reset automatically — usually within a few hours. "
+            "To remove this limit, upgrade to the Groq Dev Tier at https://console.groq.com/settings/billing"
+        )
+    elif "503" in err_str or "unavailable" in err_str:
+        msg = "The AI model is temporarily unavailable. Please try again in a minute."
+    else:
+        msg = "I'm having trouble reaching the AI engine right now. Please try again in a moment."
+
+    return {"answer": msg}

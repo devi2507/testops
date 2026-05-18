@@ -296,3 +296,37 @@ html[data-theme="light"] .auth-blob--3 { display:none; }
 }
 
 .auth-footer a { color: var(--accent); }
+
+/* ── Forgot / Reset password ── */
+.auth-reset-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12px;
+  padding: 12px 0 4px;
+}
+
+.auth-reset-done__icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.auth-reset-done h2 {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.auth-reset-done p {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  max-width: 300px;
+}

@@ -5,6 +5,7 @@ import {
   Lock, Globe, Eye, Network, Radio, ChevronDown, ChevronUp
 } from 'lucide-react';
 import BackButton from './BackButton';
+import api from '../services/api';
 import './ProgressConsole.css';
 
 // ── Execution stages mapped to % ranges ──────────────────────────────────
@@ -54,6 +55,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
   const [status, setStatus]     = useState('running');
   const [elapsed, setElapsed]   = useState(0);
   const [logsCollapsed, setLogsCollapsed] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const bottomRef = useRef(null);
   const timerRef  = useRef(null);
   const startRef  = useRef(Date.now());
@@ -69,8 +71,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
   // ── SSE connection ──
   useEffect(() => {
     if (!testId) return;
-    const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-    const es = new EventSource(`${apiUrl}/api/test/progress/${testId}`);
+    const es = api.progressStream(testId);
 
     es.onmessage = (event) => {
       const data = JSON.parse(event.data);
@@ -99,6 +100,16 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
         setLogs(p => [...p, { text: 'Audit complete — loading report…', type: 'success', ts: now() }]);
         es.close();
         setTimeout(onComplete, 1400);
+        return;
+      }
+
+      if (data.status === 'cancelled') {
+        setStatus('cancelled');
+        clearInterval(timerRef.current);
+        setLogs(p => [...p, { text: 'Scan cancelled by user.', type: 'warning', ts: now() }]);
+        es.close();
+        onError?.('Scan cancelled');
+        return;
       }
 
       if (data.status === 'failed') {
@@ -150,6 +161,21 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
     return counts;
   }, [logs]);
 
+  const cancelScan = async () => {
+    if (!testId || (status !== 'running' && status !== 'queued')) return;
+    setCancelling(true);
+    try {
+      await api.cancelScan(testId);
+      setStatus('cancelled');
+      setLogs(p => [...p, { text: 'Cancel request sent — stopping scan...', type: 'warning', ts: now() }]);
+      clearInterval(timerRef.current);
+    } catch (err) {
+      setLogs(p => [...p, { text: `Cancel failed: ${err.message}`, type: 'error', ts: now() }]);
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
     <div className="exec-page animate-fade-up">
       <BackButton label="Back" fallback="/scan" />
@@ -159,11 +185,13 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
         <div className="exec-header__status">
           {status === 'running'   && <span className="exec-status-dot exec-status-dot--running" />}
           {status === 'completed' && <CheckCircle2 size={18} color="var(--success)" />}
+          {status === 'cancelled' && <AlertTriangle size={18} color="var(--warning)" />}
           {status === 'error'     && <AlertTriangle size={18} color="var(--error)" />}
           <div>
             <h1 className="exec-header__title">
               {status === 'running'   && 'Scan In Progress'}
               {status === 'completed' && 'Scan Complete'}
+              {status === 'cancelled' && 'Scan Cancelled'}
               {status === 'error'     && 'Scan Failed'}
             </h1>
             <p className="exec-header__sub">
@@ -197,6 +225,16 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
             <span className="sev-chip sev-chip--medium">M {severityCounts.MEDIUM}</span>
             <span className="sev-chip sev-chip--low">L {severityCounts.LOW}</span>
           </div>
+          {(status === 'running' || status === 'queued') && (
+            <button
+              type="button"
+              className="exec-stop-btn"
+              onClick={cancelScan}
+              disabled={cancelling}
+            >
+              {cancelling ? 'Cancelling…' : 'Stop Scan'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -235,7 +273,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
                     <div className="stage-item__icon">
                       {done
                         ? <CheckCircle2 size={14} />
-                        : active
+                        : active && (status === 'running' || status === 'queued')
                           ? <Loader2 size={14} className="spin" />
                           : <Icon size={14} />}
                     </div>
