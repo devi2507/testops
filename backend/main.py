@@ -145,6 +145,13 @@ app = FastAPI(
     redoc_url="/redoc" if API_DOCS_ENABLED else None,
     openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 SECURITY_HEADERS = {
