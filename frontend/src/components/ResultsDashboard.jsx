@@ -2,11 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ShieldAlert, RefreshCcw, CheckCircle, AlertTriangle,
   XCircle, Info, ChevronDown, ChevronUp, Download,
-  Bug, ShieldCheck, Link,
+  Bug, ShieldCheck, Link, Trash2,
   FileText, Lightbulb, Target, AlertCircle
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { useNavigate } from 'react-router-dom';
 import BackButton from './BackButton';
+import api from '../services/api';
+import { useActiveScan } from '../context/ActiveScanContext';
 import './ResultsDashboard.css';
 
 // ─── Severity config ────────────────────────────────────────────────────────
@@ -105,6 +108,8 @@ function exportPDF(results) {
 
 // ─── Component ──────────────────────────────────────────────────────────────
 export default function ResultsDashboard({ results, testId, onReset, backTo = '/scan', backLabel = 'Back' }) {
+  const navigate = useNavigate();
+  const { activeScan, clearActiveScan } = useActiveScan();
   const [expanded, setExpanded] = useState(null);
   const [copied, setCopied]     = useState(false);
   const [activeSection, setActiveSection] = useState('vulnerabilities');
@@ -135,6 +140,11 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
   }, [bugs, critCount, highCount, lowCount, medCount]);
 
   useEffect(() => {
+    // Clear active scan if we are viewing its final report
+    if (activeScan?.scanId === testId) {
+      clearActiveScan();
+    }
+    
     // store current report in localStorage so AI assistant can access it for context
     try {
       localStorage.setItem('testops_current_report', JSON.stringify({
@@ -153,7 +163,7 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
         })),
       }));
     } catch {}
-  }, [bugs, results.securityScore, results.grade, results.bugsFound, results.target, testId]);
+  }, [bugs, results.securityScore, results.grade, results.bugsFound, results.target, testId, activeScan, clearActiveScan]);
 
   const visibleBugs = useMemo(() => {
     const q = vulnSearch.trim().toLowerCase();
@@ -203,6 +213,20 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
             <button className={`rpt-btn rpt-btn--ghost ${copied ? 'rpt-btn--copied' : ''}`} onClick={copyLink}>
               <Link size={14} />
               {copied ? 'Copied!' : 'Share'}
+            </button>
+          )}
+          {testId && (
+            <button className="rpt-btn rpt-btn--ghost" style={{ color: 'var(--error)' }} onClick={async () => {
+              if (window.confirm('Delete this scan? This cannot be undone.')) {
+                try {
+                  await api.deleteHistoryResult(testId);
+                  navigate('/history');
+                } catch {
+                  alert('Failed to delete scan');
+                }
+              }
+            }}>
+              <Trash2 size={14} /> Delete
             </button>
           )}
           <button className="rpt-btn rpt-btn--ghost" onClick={() => exportPDF(results)}>

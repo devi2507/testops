@@ -8,7 +8,7 @@
 # pip install -r requirements.txt
 
 # Start Command:
-# uvicorn main:app --host 0.0.0.0 --port $PORT
+# uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --no-server-header
 
 # Environment Variables to set in Render Dashboard:
 # MONGODB_URI=mongodb+srv://user:password@cluster.mongodb.net

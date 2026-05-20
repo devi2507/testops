@@ -330,6 +330,25 @@ export default function HistoryPage({ onNavigate }) {
                         >
                           <Download size={13} />
                         </button>
+                        <button
+                          className="ht-action-btn"
+                          style={{ color: 'var(--error)' }}
+                          title="Delete Scan"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (window.confirm('Delete this scan? This cannot be undone.')) {
+                              try {
+                                await api.deleteHistoryResult(scan.id);
+                                setHistory(h => h.filter(x => x.id !== scan.id));
+                                toast?.success('Scan deleted');
+                              } catch {
+                                toast?.error('Failed to delete scan');
+                              }
+                            }
+                          }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
                       </div>
                     </td>
                   </tr>

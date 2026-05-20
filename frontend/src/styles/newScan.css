@@ -875,17 +875,81 @@
 }
 
 .summary-row__value {
-  display: flex;
-  align-items: center;
-  gap: 6px;
   font-size: 0.82rem;
   font-weight: 500;
   color: var(--text-primary);
-  text-align: right;
-  word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.summary-row__value--mono { font-family: var(--font-mono); font-size: 0.76rem; }
+.summary-row__value--mono {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  background: var(--bg-elevated);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* ── Step 0 Action Button ── */
+.step-0-action {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  margin-bottom: 24px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+  transition: all 0.3s ease;
+  position: sticky;
+  bottom: 20px;
+  z-index: 10;
+}
+
+.step-0-action--active {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.step-0-next-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--brand-primary);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+  font-family: inherit;
+}
+
+.step-0-next-btn:hover:not(:disabled) {
+  background: var(--brand-primary-hover, #4f46e5);
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4);
+  transform: translateY(-2px);
+}
+
+.step-0-next-btn:disabled {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  box-shadow: none;
+  cursor: not-allowed;
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 640px) {
+  .step-0-next-btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
 
 .launch-summary__suites {
   padding: 10px 16px;

@@ -4,6 +4,7 @@ import {
   Shield, Clock, Activity, Zap, Search, FileCode,
   Lock, Globe, Eye, Network, Radio, ChevronDown, ChevronUp
 } from 'lucide-react';
+import { useActiveScan } from '../context/ActiveScanContext';
 import BackButton from './BackButton';
 import api from '../services/api';
 import './ProgressConsole.css';
@@ -50,6 +51,7 @@ function now() {
 }
 
 export default function ProgressConsole({ testId, onComplete, onError }) {
+  const { updateScanStatus } = useActiveScan();
   const [progress, setProgress] = useState(0);
   const [logs, setLogs]         = useState([{ text: 'TestOps AI Auditor — session started', type: 'info', ts: now() }]);
   const [status, setStatus]     = useState('running');
@@ -78,6 +80,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
 
       if (data.error) {
         setStatus('error');
+        updateScanStatus('error');
         setLogs(p => [...p, { text: data.error, type: 'error', ts: now() }]);
         onError?.(data.error);
         es.close();
@@ -85,6 +88,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
       }
 
       setProgress(data.progress || 0);
+      updateScanStatus('running', data.progress || 0);
 
       if (data.latest_log) {
         setLogs(prev => {
@@ -96,6 +100,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
 
       if (data.status === 'completed') {
         setStatus('completed');
+        updateScanStatus('completed', 100);
         clearInterval(timerRef.current);
         setLogs(p => [...p, { text: 'Audit complete — loading report…', type: 'success', ts: now() }]);
         es.close();
@@ -105,6 +110,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
 
       if (data.status === 'cancelled') {
         setStatus('cancelled');
+        updateScanStatus('cancelled');
         clearInterval(timerRef.current);
         setLogs(p => [...p, { text: 'Scan cancelled by user.', type: 'warning', ts: now() }]);
         es.close();
@@ -114,6 +120,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
 
       if (data.status === 'failed') {
         setStatus('error');
+        updateScanStatus('error');
         const msg = data.logs?.slice(-1)[0] || 'Analysis failed';
         setLogs(p => [...p, { text: msg, type: 'error', ts: now() }]);
         onError?.(msg);
@@ -167,6 +174,7 @@ export default function ProgressConsole({ testId, onComplete, onError }) {
     try {
       await api.cancelScan(testId);
       setStatus('cancelled');
+      updateScanStatus('cancelled');
       setLogs(p => [...p, { text: 'Cancel request sent — stopping scan...', type: 'warning', ts: now() }]);
       clearInterval(timerRef.current);
     } catch (err) {

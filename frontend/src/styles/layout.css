@@ -331,6 +331,91 @@
   border-color: var(--accent-border);
 }
 
+/* ── Global Active Scan Widget ── */
+.navbar-scan-widget {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  margin-right: 8px;
+}
+
+.navbar-scan-widget__info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.navbar-scan-widget__name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.navbar-scan-widget__progress {
+  width: 60px;
+  height: 4px;
+  background: var(--bg-input);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.navbar-scan-widget__bar {
+  height: 100%;
+  background: var(--brand-primary);
+  transition: width 0.3s ease;
+}
+
+.navbar-scan-widget__actions {
+  display: flex;
+}
+
+.navbar-scan-widget__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--brand-primary);
+  text-decoration: none;
+  background: var(--brand-primary-subtle, rgba(99, 102, 241, 0.1));
+  padding: 4px 10px;
+  border-radius: 99px;
+  transition: all 0.2s ease;
+}
+
+.navbar-scan-widget__btn:hover {
+  background: var(--brand-primary);
+  color: #fff;
+}
+
+.navbar-scan-widget__btn--success {
+  color: var(--success);
+  background: var(--success-bg, rgba(16, 185, 129, 0.1));
+}
+
+.navbar-scan-widget__btn--success:hover {
+  background: var(--success);
+  color: #fff;
+}
+
+.navbar-scan-widget__btn--error {
+  color: var(--error);
+  background: var(--error-bg, rgba(239, 68, 68, 0.1));
+}
+
+.navbar-scan-widget__btn--error:hover {
+  background: var(--error);
+  color: #fff;
+}
+
 .page-transition {
   animation: pageIn 0.22s ease both;
 }

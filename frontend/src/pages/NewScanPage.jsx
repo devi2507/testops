@@ -6,9 +6,11 @@ import {
   ChevronLeft, Play, Check, X, Plus, Save, FolderArchive, Loader2, Trash2
 } from 'lucide-react';
 import BackButton from '../components/BackButton';
+import { useNavigate } from 'react-router-dom';
 import ProgressConsole from '../components/ProgressConsole';
 import ResultsDashboard from '../components/ResultsDashboard';
 import { useToast } from '../context/ToastContext';
+import { useActiveScan } from '../context/ActiveScanContext';
 import api from '../services/api';
 import '../styles/newScan.css';
 
@@ -63,6 +65,23 @@ const saveUserTemplates = (list) => {
 
 const normalizeSuiteId = (id) => id === 'access' ? 'auth' : id;
 
+const hasHttpScheme = (value = '') => /^https?:\/\//i.test(value.trim());
+
+const normalizeTargetUrl = (value = '') => {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return hasHttpScheme(trimmed) ? trimmed : `https://${trimmed}`;
+};
+
+const isValidHttpUrl = (value = '') => {
+  try {
+    const parsed = new URL(normalizeTargetUrl(value));
+    return ['http:', 'https:'].includes(parsed.protocol) && !!parsed.hostname;
+  } catch {
+    return false;
+  }
+};
+
 const fileKind = (name = '') => {
   const lower = name.toLowerCase();
   if (lower.endsWith('.zip'))    return 'ZIP archive';
@@ -81,6 +100,8 @@ const templateDescription = (type, suites) =>
 
 export default function NewScanPage() {
   const toast = useToast();
+  const navigate = useNavigate();
+  const { startActiveScan } = useActiveScan();
   const [step, setStep]               = useState(0);
   const [inputType, setInputType]     = useState(null);
   const [file, setFile]               = useState(null);
@@ -173,17 +194,10 @@ export default function NewScanPage() {
 
   const handleUrl = (v) => {
     setUrl(v);
-    try {
-      const parsed = new URL(v.startsWith('http') ? v : `https://${v}`);
-      const valid  = ['http:','https:'].includes(parsed.protocol) && parsed.hostname.includes('.') && v.length > 4;
-      setUrlValid(valid);
-      if (v && !valid) setFieldError('url', 'Enter a valid HTTP or HTTPS URL.');
-      else clearFieldError('url');
-    } catch {
-      setUrlValid(false);
-      if (v) setFieldError('url', 'Enter a valid HTTP or HTTPS URL.');
-      else clearFieldError('url');
-    }
+    const valid = isValidHttpUrl(v);
+    setUrlValid(valid);
+    if (v.trim() && !valid) setFieldError('url', 'Enter a valid HTTP or HTTPS URL.');
+    else clearFieldError('url');
   };
 
   const toggleSuite = (id) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
@@ -271,11 +285,13 @@ export default function NewScanPage() {
     try {
       const fd = new FormData();
       if (inputType === 'url') {
-        const finalUrl = url.startsWith('http') ? url : `https://${url}`;
+        const finalUrl = normalizeTargetUrl(url);
         fd.append('targetUrl', finalUrl);
         fd.append('selectedTests', selected.map(normalizeSuiteId).join(','));
         const data = await api.startUrlScan(fd);
         setTestId(data.testId);
+        startActiveScan(data.testId, finalUrl, 'url');
+        navigate(`/scan/live/${data.testId}`);
       } else {
         fd.append('inputType', inputType);
         fd.append('selectedTests', selected.map(normalizeSuiteId).join(','));
@@ -283,8 +299,10 @@ export default function NewScanPage() {
         if (schemaFile) fd.append('schemaFile', schemaFile);
         const data = await api.startScan(fd);
         setTestId(data.testId);
+        startActiveScan(data.testId, file.name, inputType);
+        navigate(`/scan/live/${data.testId}`);
       }
-      setPhase('progress'); toast?.success('Scan started');
+      toast?.success('Scan started');
     } catch (err) {
       const m = err.message.includes('fetch') ? 'Cannot reach backend — ensure it is running on port 8000.' : err.message;
       setError(m); toast?.error(m);
@@ -371,6 +389,17 @@ export default function NewScanPage() {
                   {inputType === id && <div className="input-type-card__check"><Check size={12} /></div>}
                 </button>
               ))}
+            </div>
+
+            {/* Next Button for Step 0 */}
+            <div className={`step-0-action ${inputType ? 'step-0-action--active' : ''}`}>
+              <button 
+                className="step-0-next-btn"
+                disabled={!canNext()} 
+                onClick={goNext}
+              >
+                Next <ChevronRight size={16} />
+              </button>
             </div>
 
             {/* Templates panel */}
@@ -585,7 +614,7 @@ export default function NewScanPage() {
           ? <button className="newscan-nav__back" onClick={() => setStep(s => s - 1)} disabled={launching}><ChevronLeft size={16} /> Back</button>
           : <div />
         }
-        {step < 3 && (
+        {step > 0 && step < 3 && (
           <button className="newscan-nav__next" disabled={!canNext()} onClick={goNext}>
             {step === 2 ? 'Review & Launch' : 'Next'} <ChevronRight size={16} />
           </button>

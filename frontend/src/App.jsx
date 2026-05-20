@@ -10,9 +10,11 @@ import NewScanPage from './pages/NewScanPage';
 import ReportPage from './pages/ReportPage';
 import HistoryPage from './pages/HistoryPage';
 import ProfilePage from './pages/ProfilePage';
+import LiveScanPage from './pages/LiveScanPage';
 import Sidebar from './components/layout/Sidebar';
 import Navbar from './components/layout/Navbar';
 import AiAssistant from './components/AiAssistant';
+import { ActiveScanProvider } from './context/ActiveScanContext';
 import './styles/layout.css';
 
 const PAGE_PATHS = {
@@ -39,6 +41,7 @@ function AppShell() {
           <Route path="/auth" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage onNavigate={onNavigate} />} />
           <Route path="/scan" element={<NewScanPage />} />
+          <Route path="/scan/live/:testId" element={<LiveScanPage onNavigate={onNavigate} />} />
           <Route path="/history" element={<HistoryPage onNavigate={onNavigate} />} />
           <Route path="/reports" element={<ReportPage onNavigate={onNavigate} />} />
           <Route path="/reports/:reportId" element={<ReportPage onNavigate={onNavigate} />} />
@@ -75,7 +78,9 @@ export default function App() {
     <ThemeProvider>
       <ToastProvider>
         <AuthProvider>
-          <Root />
+          <ActiveScanProvider>
+            <Root />
+          </ActiveScanProvider>
         </AuthProvider>
       </ToastProvider>
     </ThemeProvider>

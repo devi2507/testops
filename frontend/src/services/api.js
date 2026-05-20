@@ -72,6 +72,7 @@ export const api = {
   waitForBackend,
   getHistory:      ()   => request('/api/history'),
   getHistoryResult: (id) => request(`/api/history/${id}`),
+  deleteHistoryResult: (id) => request(`/api/history/${id}`, { method: 'DELETE' }),
   clearHistory:    ()   => request('/api/history', { method: 'DELETE' }),
   getResults:      (id) => request(`/api/test/results/${id}`),
   cancelScan:      (id) => request(`/cancel-scan/${id}`, { method: 'POST' }),

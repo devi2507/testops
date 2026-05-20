@@ -205,7 +205,12 @@ export default function DashboardPage({ onNavigate }) {
                   const short = (scan.target || '—').length > 28
                     ? '…' + scan.target.slice(-26) : (scan.target || '—');
                   return (
-                    <tr key={scan.id}>
+                    <tr 
+                      key={scan.id} 
+                      onClick={() => navigate(`/reports/${scan.id}`)}
+                      style={{ cursor: 'pointer' }}
+                      className="clickable-row"
+                    >
                       <td>
                         <div className="scan-target">
                           <div className="scan-target__icon">

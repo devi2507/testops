@@ -5,12 +5,16 @@ API key is loaded from .env — users never need to enter one.
 """
 
 import asyncio, uuid, os, zipfile, tempfile, shutil, json, re, ssl, time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from typing import List, Optional
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, BackgroundTasks, File, UploadFile, Form
+from fastapi import FastAPI, BackgroundTasks, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 import httpx
 
@@ -132,22 +136,138 @@ async def send_invitation_email(recipient_email: str, inviter_name: str, workspa
         print(f"[Email] Failed to send invitation to {recipient_email}: {e}")
 
 
-app = FastAPI(title="TestOps Platform", version="2.0")
+API_DOCS_ENABLED = os.environ.get("ENABLE_API_DOCS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+app = FastAPI(
+    title="TestOps Platform",
+    version="2.0",
+    docs_url="/docs" if API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
+)
+
+DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+HSTS_HEADER = "max-age=31536000; includeSubDomains"
+AUTH_RATE_LIMIT_PATHS = {"/login", "/api/login", "/api/auth/login", "/auth/login", "/signin"}
+RATE_LIMIT_EXEMPT_PREFIXES = ("/api/test/progress",)
+RATE_LIMIT_EXEMPT_PATHS = {"/health", "/api/health"}
+_rate_limit_hits = defaultdict(deque)
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_allowed_origins() -> list[str]:
+    raw = os.environ.get("ALLOWED_ORIGINS", "").strip()
+    if raw == "*" and env_bool("ALLOW_CORS_WILDCARD", False):
+        return ["*"]
+    if not raw or raw == "*":
+        return DEFAULT_ALLOWED_ORIGINS
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def request_is_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return forwarded_proto == "https" or request.url.scheme == "https"
+
+
+def is_rate_limit_exempt(path: str) -> bool:
+    return path in RATE_LIMIT_EXEMPT_PATHS or any(path.startswith(prefix) for prefix in RATE_LIMIT_EXEMPT_PREFIXES)
+
+
+def rate_limit_for(request: Request) -> tuple[int, int]:
+    path = request.url.path.rstrip("/") or "/"
+    window = env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
+    if request.method.upper() == "POST" and path in AUTH_RATE_LIMIT_PATHS:
+        return env_int("AUTH_RATE_LIMIT_MAX_REQUESTS", 5), window
+    return env_int("RATE_LIMIT_MAX_REQUESTS", 240), window
+
+
+def is_rate_limited(request: Request) -> tuple[bool, int]:
+    path = request.url.path.rstrip("/") or "/"
+    if request.method.upper() == "OPTIONS" or is_rate_limit_exempt(path):
+        return False, 0
+
+    max_requests, window = rate_limit_for(request)
+    now = time.monotonic()
+    key = f"{client_ip(request)}:{request.method.upper()}:{path}"
+    hits = _rate_limit_hits[key]
+    while hits and now - hits[0] > window:
+        hits.popleft()
+    if len(hits) >= max_requests:
+        retry_after = max(1, int(window - (now - hits[0]))) if hits else window
+        return True, retry_after
+    hits.append(now)
+    return False, 0
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    limited, retry_after = is_rate_limited(request)
+    if limited:
+        return JSONResponse(
+            {"detail": "Too many requests. Please retry later."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    response = await call_next(request)
+    docs_path = request.url.path.startswith(("/docs", "/redoc", "/openapi.json"))
+    for header, value in SECURITY_HEADERS.items():
+        if header == "Content-Security-Policy" and docs_path:
+            continue
+        response.headers.setdefault(header, value)
+    if request_is_https(request):
+        response.headers.setdefault("Strict-Transport-Security", HSTS_HEADER)
+    for header in ("server", "x-powered-by"):
+        if header in response.headers:
+            del response.headers[header]
+    return response
+
+
+if env_bool("FORCE_HTTPS", False):
+    app.add_middleware(HTTPSRedirectMiddleware)
 
 @app.get("/health")
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok", "message": "Backend is alive"}
 
-allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
-allowed_origins = [origin.strip() for origin in allowed_origins if origin.strip()]
+allowed_origins = parse_allowed_origins()
+allow_all_origins = allowed_origins == ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins if allowed_origins != ["*"] else ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=allowed_origins,
+    allow_credentials=False if allow_all_origins else True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin"],
 )
 
 class BugReport(BaseModel):
@@ -681,22 +801,37 @@ Rules:
             )
 
         client = Groq(api_key=groq_key)
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a strict technical auditor. "
-                        "You ONLY report issues matching the requested test categories. "
-                        "Output ONLY raw valid JSON. No markdown, no extra text."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=3500,
-        )
+        
+        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+        response = None
+        for i, model_name in enumerate(models_to_try):
+            try:
+                if i > 0:
+                    log(f"Sending to Groq AI ({model_name})...", 65)
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a strict technical auditor. "
+                                "You ONLY report issues matching the requested test categories. "
+                                "Output ONLY raw valid JSON. No markdown, no extra text."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0,
+                    max_tokens=3500,
+                )
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("rate_limit" in err_str or "429" in err_str or "too many requests" in err_str) and i < len(models_to_try) - 1:
+                    log(f"Rate limit hit for {model_name}. Falling back...", 65)
+                    continue
+                raise e
+
         raw = response.choices[0].message.content or ""
         log("Parsing AI response...", 85)
         await asyncio.sleep(0.3)
@@ -745,6 +880,9 @@ Rules:
         # Persist to MongoDB
         target_label = active_tests[test_id]["config"].get("target", "uploaded file")
         await save_audit(test_id, input_type, selected_tests, target_label, result_obj)
+
+        for bug in filtered_bugs:
+            log(f"[{bug.get('severity', 'LOW').upper()}] {bug.get('title', 'Issue found')}", 95)
 
         log(f"Report ready: {len(filtered_bugs)} issue(s) found.", 100)
         active_tests[test_id]["status"] = "completed"
@@ -903,6 +1041,19 @@ async def get_history_result(test_id: str):
     raise HTTPException(status_code=404, detail="Report not found")
 
 
+@app.delete("/api/history/{test_id}")
+async def delete_history_result(test_id: str):
+    if test_id in test_results:
+        del test_results[test_id]
+    if test_id in active_tests:
+        del active_tests[test_id]
+        
+    result = await audits_col.delete_one({"_id": test_id})
+    if result.deleted_count == 0 and test_id not in test_results:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {"deleted": True}
+
+
 # ══ URL Scan ═════════════════════════════════════════════════════
 # URL-specific test suite IDs and what they probe
 URL_SUITE_FOCUS = {
@@ -924,6 +1075,81 @@ URL_TYPE_FILTER = {
     "disclosure": ["Security", "Information Disclosure"],
     "ratelimit":  ["Security", "Configuration"],
 }
+
+
+def is_loopback_target(hostname: str | None) -> bool:
+    host = (hostname or "").strip("[]").lower()
+    if host in {"localhost", "0.0.0.0", "host.docker.internal"}:
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+API_DOC_PATHS = {"/swagger", "/api/docs", "/api/swagger.json", "/openapi.json"}
+ADMIN_PATHS = {"/admin", "/dashboard"}
+
+
+def compact_body_fingerprint(text: str = "") -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:1200]
+
+
+def filter_url_false_positives(result_dict: dict, findings: dict) -> dict:
+    target_context = findings.get("target_context", {})
+    cookies = findings.get("cookies", {})
+    rate_limiting = findings.get("rate_limiting", {})
+    cors = findings.get("cors", {})
+    sensitive_paths = findings.get("sensitive_paths", {})
+    exposed_paths = set(sensitive_paths.get("exposed_paths", []))
+
+    filtered = []
+    for bug in result_dict.get("bugs", []):
+        text = " ".join(str(bug.get(k, "")) for k in ("title", "reason", "recommendation")).lower()
+
+        if target_context.get("local_development_target") and any(
+            token in text for token in ("https", "ssl", "tls", "certificate", "hsts", "strict-transport-security")
+        ):
+            continue
+
+        if target_context.get("local_development_target") and any(
+            token in text for token in ("content security policy", "csp", "unsafe-inline", "unsafe-eval")
+        ):
+            continue
+
+        if not cookies.get("flags_applicable", False) and "cookie" in text:
+            continue
+
+        if not rate_limiting.get("tested_existing_endpoint", False) and any(
+            token in text for token in ("rate limit", "rate-limit", "brute force", "brute-force")
+        ):
+            continue
+
+        if not cors.get("permissive", False) and "cors" in text:
+            continue
+
+        if ("server header" in text and any(token in text for token in ("missing", "absent", "not present"))) or (
+            "x-powered-by" in text and any(token in text for token in ("missing", "absent", "not present"))
+        ):
+            continue
+
+        if not exposed_paths and any(token in text for token in ("exposed sensitive", "sensitive path", "sensitive paths")):
+            continue
+
+        if not exposed_paths.intersection(API_DOC_PATHS) and any(
+            token in text for token in ("api documentation", "openapi", "swagger")
+        ):
+            continue
+
+        if not exposed_paths.intersection(ADMIN_PATHS) and any(
+            token in text for token in ("admin", "dashboard", "access control")
+        ):
+            continue
+
+        filtered.append(bug)
+
+    result_dict["bugs"] = filtered
+    return result_dict
 
 
 @app.post("/api/test/url-start")
@@ -964,10 +1190,21 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
         return False
 
     # Ensure URL has scheme
-    if not target_url.startswith(("http://", "https://")):
+    target_url = target_url.strip()
+    if not target_url.lower().startswith(("http://", "https://")):
         target_url = "https://" + target_url
 
     findings = {}   # will hold all raw probe data
+    parsed_target = urlparse(target_url)
+    target_is_local = is_loopback_target(parsed_target.hostname)
+    findings["target_context"] = {
+        "hostname": parsed_target.hostname,
+        "scheme": parsed_target.scheme,
+        "local_development_target": target_is_local,
+        "tls_checks_applicable": not target_is_local,
+        "note": "Localhost/loopback targets are development endpoints; public HTTPS certificate enforcement is not applicable."
+                if target_is_local else "Public or non-loopback target.",
+    }
 
     try:
         log(f"Connecting to {target_url}...", 10)
@@ -1015,6 +1252,7 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
                 "Permissions-Policy":        resp_headers.get("permissions-policy"),
                 "Server":                    resp_headers.get("server"),
                 "X-Powered-By":              resp_headers.get("x-powered-by"),
+                "HSTS-Applicable":           not target_is_local and str(resp.url).startswith("https://"),
             }
             findings["security_headers"] = security_headers_check
 
@@ -1026,6 +1264,15 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             for k, v in resp.cookies.items():
                 cookies_found.append({"name": k, "value_preview": v[:12] + "..." if len(v) > 12 else v})
             set_cookie_raw = resp_headers.get("set-cookie", "")
+            missing_cookie_flags = []
+            if set_cookie_raw:
+                raw_cookie_lower = set_cookie_raw.lower()
+                if "httponly" not in raw_cookie_lower:
+                    missing_cookie_flags.append("HttpOnly")
+                if "secure" not in raw_cookie_lower:
+                    missing_cookie_flags.append("Secure")
+                if "samesite" not in raw_cookie_lower:
+                    missing_cookie_flags.append("SameSite")
             findings["cookies"] = {
                 "count":         len(cookies_found),
                 "names":         [c["name"] for c in cookies_found],
@@ -1033,6 +1280,10 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
                 "has_httponly":  "httponly" in set_cookie_raw.lower(),
                 "has_secure":    "secure" in set_cookie_raw.lower(),
                 "has_samesite":  "samesite" in set_cookie_raw.lower(),
+                "flags_applicable": bool(set_cookie_raw),
+                "missing_flags": missing_cookie_flags,
+                "note": "No Set-Cookie header observed; cookie flag checks are not applicable."
+                        if not set_cookie_raw else "Set-Cookie header observed.",
             }
 
             # ── CORS ─────────────────────────────────────────────────
@@ -1044,18 +1295,24 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
                 headers={**headers_to_send, "Origin": "https://evil-attacker.com",
                          "Access-Control-Request-Method": "GET"},
             )
+            allow_origin = cors_resp.headers.get("access-control-allow-origin", "not set")
+            allow_credentials = cors_resp.headers.get("access-control-allow-credentials", "not set")
+            cors_permissive = allow_origin == "*" or allow_origin == "https://evil-attacker.com"
             findings["cors"] = {
-                "allow_origin":      cors_resp.headers.get("access-control-allow-origin", "not set"),
-                "allow_credentials": cors_resp.headers.get("access-control-allow-credentials", "not set"),
+                "allow_origin":      allow_origin,
+                "allow_credentials": allow_credentials,
                 "allow_methods":     cors_resp.headers.get("access-control-allow-methods", "not set"),
                 "allow_headers":     cors_resp.headers.get("access-control-allow-headers", "not set"),
+                "permissive":        cors_permissive,
+                "credentials_with_permissive_origin": cors_permissive and allow_credentials.lower() == "true",
             }
 
             # ── Exposed sensitive paths ────────────────────────────────
             log("Probing sensitive paths...", 54)
             if abort_if_cancelled():
                 return
-            base = f"{resp.url.scheme}://{resp.url.host}"
+            resolved_url = urlparse(str(resp.url))
+            base = f"{resolved_url.scheme}://{resolved_url.netloc}"
             sensitive_paths = [
                 "/.env", "/.git/config", "/robots.txt", "/swagger",
                 "/api/docs", "/api/v1/users", "/admin", "/dashboard",
@@ -1063,20 +1320,45 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
                 "/api/swagger.json", "/openapi.json",
             ]
             path_results = {}
+            root_is_html = "text/html" in resp_headers.get("content-type", "").lower()
+            root_fingerprint = compact_body_fingerprint(resp.text) if root_is_html else ""
             for path in sensitive_paths:
                 try:
                     pr = await client.get(base + path, headers=headers_to_send)
-                    path_results[path] = {"status": pr.status_code, "exposed": pr.status_code == 200}
+                    content_type = pr.headers.get("content-type", "")
+                    is_html = "text/html" in content_type.lower()
+                    same_spa_shell = (
+                        pr.status_code == 200
+                        and root_fingerprint
+                        and is_html
+                        and compact_body_fingerprint(pr.text) == root_fingerprint
+                    )
+                    public_metadata = path in {"/robots.txt", "/.well-known/security.txt"}
+                    exposed = pr.status_code == 200 and not same_spa_shell and not public_metadata
+                    path_results[path] = {
+                        "status": pr.status_code,
+                        "content_type": content_type or "not set",
+                        "spa_fallback": same_spa_shell,
+                        "public_metadata": public_metadata,
+                        "exposed": exposed,
+                    }
                 except Exception:
-                    path_results[path] = {"status": "error", "exposed": False}
-            findings["sensitive_paths"] = path_results
+                    path_results[path] = {"status": "error", "exposed": False, "spa_fallback": False}
+            exposed_paths = [path for path, details in path_results.items() if details.get("exposed")]
+            findings["sensitive_paths"] = {
+                "paths": path_results,
+                "exposed_paths": exposed_paths,
+                "api_documentation_exposed": any(path in API_DOC_PATHS for path in exposed_paths),
+                "admin_or_dashboard_exposed": any(path in ADMIN_PATHS for path in exposed_paths),
+                "note": "HTML responses identical to the root document are treated as SPA fallback, not exposed resources.",
+            }
 
             # ── Rate limiting ─────────────────────────────────────────
             log("Testing rate limiting...", 64)
             if abort_if_cancelled():
                 return
             login_paths = ["/login", "/api/login", "/api/auth/login", "/auth/login", "/signin"]
-            rate_results = {}
+            rate_path_results = {}
             for lp in login_paths:
                 try:
                     statuses = []
@@ -1085,46 +1367,70 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
                                               json={"username": "test", "password": "test"},
                                               timeout=4.0)
                         statuses.append(r.status_code)
-                    rate_results[lp] = {
+                    endpoint_exists = any(s not in [404, 405] for s in statuses)
+                    rate_path_results[lp] = {
                         "status_codes": statuses,
+                        "endpoint_exists": endpoint_exists,
                         "rate_limited": any(s in [429, 503] for s in statuses),
                     }
                 except Exception:
                     pass   # path doesn't exist, skip
-            findings["rate_limiting"] = rate_results
+            tested_existing_endpoint = any(r["endpoint_exists"] for r in rate_path_results.values())
+            findings["rate_limiting"] = {
+                "paths": rate_path_results,
+                "tested_existing_endpoint": tested_existing_endpoint,
+                "protected": any(r["rate_limited"] for r in rate_path_results.values() if r["endpoint_exists"]),
+                "applicable": tested_existing_endpoint,
+                "note": "No login/auth endpoint responded as present; rate-limit finding is not applicable."
+                        if not tested_existing_endpoint else "At least one login/auth candidate responded as present.",
+            }
 
         # ── SSL check (sync, separate context) ──────────────────────
         log("Checking SSL/TLS certificate...", 72)
         if abort_if_cancelled():
             return
         import socket
-        from urllib.parse import urlparse
         ssl_info = {}
-        try:
-            parsed  = urlparse(target_url)
-            host    = parsed.hostname
-            port    = parsed.port or 443
-            ctx     = ssl.create_default_context()
-            conn    = ctx.wrap_socket(socket.socket(), server_hostname=host)
-            conn.settimeout(8)
-            conn.connect((host, port))
-            cert    = conn.getpeercert()
-            conn.close()
-            import datetime
-            expiry  = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-            days_left = (expiry - datetime.datetime.utcnow()).days
+        parsed = urlparse(target_url)
+        if target_is_local:
             ssl_info = {
-                "valid":            True,
-                "subject":          dict(x[0] for x in cert.get("subject", [])),
-                "issuer":           dict(x[0] for x in cert.get("issuer", [])),
-                "expires":          cert["notAfter"],
-                "days_until_expiry": days_left,
-                "tls_version":      conn.version() if hasattr(conn, "version") else "unknown",
+                "applicable": False,
+                "valid": None,
+                "note": "Skipped for localhost/loopback development target.",
             }
-        except ssl.SSLCertVerificationError as e:
-            ssl_info = {"valid": False, "error": str(e)}
-        except Exception as e:
-            ssl_info = {"valid": None, "error": str(e), "note": "Could not inspect certificate"}
+        elif parsed.scheme != "https":
+            ssl_info = {
+                "applicable": True,
+                "valid": False,
+                "error": "Target URL uses HTTP; no TLS certificate was presented.",
+            }
+        else:
+            try:
+                host    = parsed.hostname
+                port    = parsed.port or 443
+                ctx     = ssl.create_default_context()
+                conn    = ctx.wrap_socket(socket.socket(), server_hostname=host)
+                conn.settimeout(8)
+                conn.connect((host, port))
+                cert        = conn.getpeercert()
+                tls_version = conn.version() if hasattr(conn, "version") else "unknown"
+                conn.close()
+                import datetime
+                expiry  = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                days_left = (expiry - datetime.datetime.utcnow()).days
+                ssl_info = {
+                    "applicable":       True,
+                    "valid":            True,
+                    "subject":          dict(x[0] for x in cert.get("subject", [])),
+                    "issuer":           dict(x[0] for x in cert.get("issuer", [])),
+                    "expires":          cert["notAfter"],
+                    "days_until_expiry": days_left,
+                    "tls_version":      tls_version,
+                }
+            except ssl.SSLCertVerificationError as e:
+                ssl_info = {"applicable": True, "valid": False, "error": str(e)}
+            except Exception as e:
+                ssl_info = {"applicable": True, "valid": None, "error": str(e), "note": "Could not inspect certificate"}
         findings["ssl"] = ssl_info
 
         # ── Build AI prompt ──────────────────────────────────────────
@@ -1178,6 +1484,14 @@ Respond with ONLY a raw JSON object:
 Rules:
 - Only report issues ACTUALLY FOUND in the probe data above — do not invent issues
 - "type" MUST be one of: {allowed_url_str}
+- If target_context.local_development_target is true, do not report HTTPS enforcement, SSL/TLS certificate, or HSTS findings.
+- Do not report missing cookie security flags when cookies.flags_applicable is false.
+- Do not report missing rate limiting when rate_limiting.tested_existing_endpoint is false.
+- Do not report CORS issues when cors.permissive is false.
+- Do not report missing Server or X-Powered-By headers; their absence reduces version disclosure.
+- Do not report paths where sensitive_paths.paths[path].spa_fallback is true; that is only the React SPA shell.
+- Do not report API documentation exposure unless sensitive_paths.api_documentation_exposed is true.
+- Do not report admin/dashboard exposure unless sensitive_paths.admin_or_dashboard_exposed is true.
 - Raw JSON only, no markdown"""
 
         groq_key = os.environ.get("GROQ_API_KEY", "")
@@ -1185,15 +1499,33 @@ Rules:
             raise Exception("GROQ_API_KEY not configured in backend/.env")
 
         client_groq = Groq(api_key=groq_key)
-        response = client_groq.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are a strict web security auditor. Output ONLY raw valid JSON. No markdown."},
-                {"role": "user",   "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=3500,
-        )
+        
+        models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+        response = None
+        for i, model_name in enumerate(models_to_try):
+            try:
+                if i == 0:
+                    log(f"Sending to Groq AI ({model_name})...", 85)
+                else:
+                    log(f"Sending to Groq AI ({model_name})...", 85)
+                
+                response = client_groq.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a strict web security auditor. Output ONLY raw valid JSON. No markdown."},
+                        {"role": "user",   "content": prompt},
+                    ],
+                    temperature=0,
+                    max_tokens=3500,
+                )
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("rate_limit" in err_str or "429" in err_str or "too many requests" in err_str) and i < len(models_to_try) - 1:
+                    log(f"Rate limit hit for {model_name}. Falling back...", 85)
+                    continue
+                raise e
+
         raw = response.choices[0].message.content or ""
         log("Parsing AI analysis...", 90)
 
@@ -1202,12 +1534,8 @@ Rules:
             if isinstance(bug.get("reproduction"), list):
                 bug["reproduction"] = "\n".join(str(s) for s in bug["reproduction"])
 
-        # Validate score
-        raw_score = result_dict.get("securityScore", 50)
-        try:
-            score = max(0, min(100, int(raw_score)))
-        except Exception:
-            score = compute_score(result_dict.get("bugs", []))
+        result_dict = filter_url_false_positives(result_dict, findings)
+        score = compute_score(result_dict.get("bugs", []))
 
         result_dict["securityScore"] = score
         result_dict["grade"]         = score_to_grade(score)
@@ -1218,6 +1546,9 @@ Rules:
 
         # Persist to MongoDB
         await save_audit(test_id, "url", selected_tests, target_url, url_result)
+
+        for bug in result_dict.get("bugs", []):
+            log(f"[{bug.get('severity', 'LOW').upper()}] {bug.get('title', 'Issue found')}", 95)
 
         log(f"URL audit complete: {result_dict['bugsFound']} issue(s) found.", 100)
         active_tests[test_id]["status"] = "completed"
