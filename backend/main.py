@@ -28,7 +28,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 # ── MongoDB (Atlas) persistence ─────────────────────────────────────────
 MONGODB_URI  = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
-_mongo       = AsyncIOMotorClient(MONGODB_URI)
+_mongo       = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
 _db          = _mongo["testops"]
 audits_col   = _db["audits"]
 
@@ -145,6 +145,19 @@ app = FastAPI(
     redoc_url="/redoc" if API_DOCS_ENABLED else None,
     openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"Internal Server Error: {type(exc).__name__}",
+            "message": str(exc)
+        }
+    )
+
 
 DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 SECURITY_HEADERS = {
