@@ -214,14 +214,46 @@ export default function AuthPage({ onBack }) {
     setErrors({});
     setLoading(true);
     await new Promise(r => setTimeout(r, 900));
-    const userData = {
-      name:          form.name || form.email.split('@')[0],
-      email:         form.email,
-      password:      form.password,
-      joinedAt:      new Date().toISOString(),
-      avatarInitial: (form.name || form.email)[0].toUpperCase(),
-    };
-    login(userData);
+
+    if (isRegister) {
+      // New account — build fresh
+      const userData = {
+        name:          form.name || form.email.split('@')[0],
+        email:         form.email,
+        password:      form.password,
+        joinedAt:      new Date().toISOString(),
+        avatarInitial: (form.name || form.email)[0].toUpperCase(),
+      };
+      login(userData);
+    } else {
+      // Signing in — restore any previously saved profile data (name, org, etc.)
+      let existing = null;
+      try {
+        const stored = localStorage.getItem('testops_user');
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed?.email?.toLowerCase() === form.email.toLowerCase()) {
+            existing = parsed;
+          }
+        }
+      } catch {}
+
+      const userData = {
+        // Start with existing saved profile so name/org changes survive logout
+        ...(existing || {}),
+        // Always refresh email and password from the login form
+        email:         form.email,
+        password:      form.password,
+        // Only set these if no existing profile
+        name:          existing?.name || form.email.split('@')[0],
+        joinedAt:      existing?.joinedAt || new Date().toISOString(),
+        avatarInitial: existing?.name
+          ? existing.name[0].toUpperCase()
+          : form.email[0].toUpperCase(),
+      };
+      login(userData);
+    }
+
     setLoading(false);
   };
 

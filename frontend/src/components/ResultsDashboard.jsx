@@ -38,6 +38,31 @@ function extractFixSnippet(text = '') {
   return '';
 }
 
+// Renders reproduction steps as a proper numbered list
+// Handles both "1. step" format and plain line-by-line format
+function ReproSteps({ text }) {
+  if (!text || text === 'Not specified.') {
+    return <p className="detail-block__text">Not specified.</p>;
+  }
+
+  // Split into lines, strip empty ones
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Check if lines already have numbering like "1." or "1)"
+  const isNumbered = lines.every(l => /^\d+[\.\)]\s/.test(l));
+
+  // Strip existing numbers if present, we'll re-render with <ol>
+  const steps = lines.map(l => l.replace(/^\d+[\.\)]\s+/, ''));
+
+  return (
+    <ol className="detail-repro-list">
+      {steps.map((step, i) => (
+        <li key={i}>{step}</li>
+      ))}
+    </ol>
+  );
+}
+
 // ─── PDF Export ─────────────────────────────────────────────────────────────
 function exportPDF(results) {
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
@@ -424,7 +449,7 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
                                 <FileText size={14} />
                                 Reproduction Steps
                               </div>
-                              <pre className="detail-block__code">{bug.reproduction || 'Not specified.'}</pre>
+                              <ReproSteps text={bug.reproduction || 'Not specified.'} />
                             </div>
 
                             <div className="detail-block detail-block--fix">

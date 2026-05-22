@@ -553,6 +553,22 @@
   line-height: 1.65;
 }
 
+.detail-repro-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  list-style-type: decimal;
+}
+
+.detail-repro-list li {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  padding-left: 4px;
+}
+
 .detail-fix-snippet {
   margin-top: 10px;
 }

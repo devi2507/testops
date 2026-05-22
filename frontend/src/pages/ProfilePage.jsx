@@ -31,17 +31,20 @@ export default function ProfilePage() {
 
   const handleSave = (e) => {
     e.preventDefault();
-    const updated = { ...user, ...form };
+    const updated = {
+      ...user,
+      ...form,
+      // Keep avatarInitial in sync with the new name
+      avatarInitial: form.name?.trim()
+        ? form.name.trim()[0].toUpperCase()
+        : user?.avatarInitial || 'U',
+    };
     login(updated);
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   };
 
   const set = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }));
-
-  const memberSince = user?.joinedAt
-    ? new Date(user.joinedAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
-    : 'Unknown';
 
   return (
     <div className="profile-page animate-fade-up">
@@ -58,9 +61,6 @@ export default function ProfilePage() {
           <div className="profile-hero__meta">
             <span className="badge badge--accent">
               <ShieldCheck size={11} /> Security Analyst
-            </span>
-            <span className="profile-hero__since">
-              <Calendar size={12} /> Member since {memberSince}
             </span>
           </div>
         </div>

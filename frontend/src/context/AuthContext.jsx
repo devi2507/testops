@@ -7,9 +7,12 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const stored = localStorage.getItem('testops_user');
-    if (stored) {
-      try { setUser(JSON.parse(stored)); } catch { localStorage.removeItem('testops_user'); }
+    const sessionActive = localStorage.getItem('testops_session_active');
+    if (sessionActive === 'true') {
+      const stored = localStorage.getItem('testops_user');
+      if (stored) {
+        try { setUser(JSON.parse(stored)); } catch { localStorage.removeItem('testops_user'); }
+      }
     }
     setLoading(false);
   }, []);
@@ -17,11 +20,12 @@ export function AuthProvider({ children }) {
   const login = (userData) => {
     setUser(userData);
     localStorage.setItem('testops_user', JSON.stringify(userData));
+    localStorage.setItem('testops_session_active', 'true');
   };
 
   const logout = () => {
     setUser(null);
-    localStorage.removeItem('testops_user');
+    localStorage.removeItem('testops_session_active');
   };
 
   return (
