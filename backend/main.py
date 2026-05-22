@@ -24,11 +24,12 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from groq import Groq
 from fastapi import HTTPException
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # ── MongoDB (Atlas) persistence ─────────────────────────────────────────
 MONGODB_URI  = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
-_mongo       = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+_mongo       = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
 _db          = _mongo["testops"]
 audits_col   = _db["audits"]
 
