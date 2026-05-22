@@ -160,7 +160,7 @@ export default function ProfilePage() {
             </div>
             <div className="pf-api-row">
               <span className="pf-api-label">Backend</span>
-              <span className="badge badge--accent">FastAPI · localhost:8000</span>
+              <span className="badge badge--accent">FastAPI · {api.baseUrl.replace(/^https?:\/\//, '')}</span>
             </div>
           </div>
         </div>

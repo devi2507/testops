@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import api from '../services/api';
 
 const ActiveScanContext = createContext(null);
 
@@ -23,7 +24,7 @@ export function ActiveScanProvider({ children }) {
   // Global background listener for running scans
   useEffect(() => {
     if (activeScan && activeScan.currentStatus === 'running') {
-      const es = new EventSource(`http://localhost:8000/api/test/progress/${activeScan.scanId}`);
+      const es = new EventSource(`${api.baseUrl}/api/test/progress/${activeScan.scanId}`);
       
       es.onmessage = (e) => {
         try {

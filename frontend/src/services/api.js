@@ -1,8 +1,16 @@
-const BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const getBackendUrl = () => {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('testops_backend_url');
+    if (stored) return stored.replace(/\/$/, '');
+  }
+  return (process.env.REACT_APP_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+};
+
 const HEALTH_PATHS = ['/health', '/api/health'];
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
+  const base = getBackendUrl();
+  const res = await fetch(`${base}${path}`, {
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
   });
@@ -14,7 +22,8 @@ async function request(path, options = {}) {
 }
 
 async function formRequest(path, formData, options = {}) {
-  const res = await fetch(`${BASE}${path}`, { method: 'POST', body: formData, ...options });
+  const base = getBackendUrl();
+  const res = await fetch(`${base}${path}`, { method: 'POST', body: formData, ...options });
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(payload.detail || 'Request failed');
@@ -23,7 +32,8 @@ async function formRequest(path, formData, options = {}) {
 }
 
 async function formRequestWithoutJson(path, formData, options = {}) {
-  const res = await fetch(`${BASE}${path}`, { method: 'POST', body: formData, ...options });
+  const base = getBackendUrl();
+  const res = await fetch(`${base}${path}`, { method: 'POST', body: formData, ...options });
   if (!res.ok) {
     const payload = await res.json().catch(() => ({}));
     throw new Error(payload.detail || 'Request failed');
@@ -32,8 +42,13 @@ async function formRequestWithoutJson(path, formData, options = {}) {
 }
 
 async function healthRequest(path) {
-  const res = await fetch(`${BASE}${path}`, { method: 'GET' });
-  return res.ok;
+  const base = getBackendUrl();
+  try {
+    const res = await fetch(`${base}${path}`, { method: 'GET' });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms) {
@@ -58,7 +73,15 @@ async function waitForBackend({ attempts = 12, interval = 1000 } = {}) {
 }
 
 export const api = {
-  baseUrl: BASE,
+  get baseUrl() { return getBackendUrl(); },
+  setBackendUrl: (url) => {
+    if (url) {
+      localStorage.setItem('testops_backend_url', url.trim().replace(/\/$/, ''));
+    }
+  },
+  resetBackendUrl: () => {
+    localStorage.removeItem('testops_backend_url');
+  },
   health: async () => {
     for (const path of HEALTH_PATHS) {
       try {
@@ -78,7 +101,7 @@ export const api = {
   cancelScan:      (id) => request(`/cancel-scan/${id}`, { method: 'POST' }),
   startScan:       (formData) => formRequest('/api/test/start', formData),
   startUrlScan:    (formData) => formRequest('/api/test/url-start', formData),
-  progressStream:  (testId) => new EventSource(`${BASE}/api/test/progress/${testId}`),
+  progressStream:  (testId) => new EventSource(`${getBackendUrl()}/api/test/progress/${testId}`),
   getTemplates:    () => request('/api/templates'),
   createTemplate:  (template) => request('/api/templates', { method: 'POST', body: JSON.stringify(template) }),
   deleteTemplate:  (id) => request(`/api/templates/${id}`, { method: 'DELETE' }),

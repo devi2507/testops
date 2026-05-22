@@ -2,9 +2,12 @@ import React, {
   useState, useRef, useEffect, useCallback, useMemo
 } from 'react';
 import { Bot, X, Send, User, Sparkles, RotateCcw } from 'lucide-react';
+import api from '../services/api';
 import '../styles/aiAssistant.css';
 
-const BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const BASE = {
+  toString() { return api.baseUrl; }
+};
 
 // ── Suggestions shown before first message ───────────────────────────────
 const SUGGESTIONS = [

@@ -145,13 +145,6 @@ app = FastAPI(
     redoc_url="/redoc" if API_DOCS_ENABLED else None,
     openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 SECURITY_HEADERS = {
@@ -185,9 +178,9 @@ def env_int(name: str, default: int) -> int:
 
 def parse_allowed_origins() -> list[str]:
     raw = os.environ.get("ALLOWED_ORIGINS", "").strip()
-    if raw == "*" and env_bool("ALLOW_CORS_WILDCARD", False):
+    if raw == "*":
         return ["*"]
-    if not raw or raw == "*":
+    if not raw:
         return DEFAULT_ALLOWED_ORIGINS
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
@@ -272,9 +265,10 @@ allow_all_origins = allowed_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False if allow_all_origins else True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Origin"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 class BugReport(BaseModel):

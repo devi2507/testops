@@ -34,6 +34,56 @@ export default function DashboardPage({ onNavigate }) {
   const [history, setHistory]   = useState([]);
   const [loading, setLoading]   = useState(true);
   const [backendOk, setBackendOk] = useState(null);
+  const [showConnModal, setShowConnModal] = useState(false);
+  const [testUrl, setTestUrl] = useState(api.baseUrl);
+  const [testStatus, setTestStatus] = useState(null);
+  const [testMsg, setTestMsg] = useState('');
+
+  const handleTestConnection = async () => {
+    if (!testUrl) return;
+    setTestStatus('loading');
+    setTestMsg('Connecting to backend...');
+    try {
+      const cleanUrl = testUrl.trim().replace(/\/$/, '');
+      let active = false;
+      try {
+        const r1 = await fetch(`${cleanUrl}/health`, { method: 'GET' });
+        if (r1.ok) active = true;
+      } catch {}
+      
+      if (!active) {
+        try {
+          const r2 = await fetch(`${cleanUrl}/api/health`, { method: 'GET' });
+          if (r2.ok) active = true;
+        } catch {}
+      }
+
+      if (active) {
+        setTestStatus('success');
+        setTestMsg('Connected successfully! Backend is active.');
+      } else {
+        setTestStatus('error');
+        setTestMsg('Unable to connect. Check URL or verify backend is online.');
+      }
+    } catch (e) {
+      setTestStatus('error');
+      setTestMsg('Connection failed. Network error.');
+    }
+  };
+
+  const handleSaveConnection = () => {
+    if (testUrl) {
+      api.setBackendUrl(testUrl);
+      setShowConnModal(false);
+      window.location.reload();
+    }
+  };
+
+  const handleResetConnection = () => {
+    api.resetBackendUrl();
+    setShowConnModal(false);
+    window.location.reload();
+  };
 
   useEffect(() => {
     let active = true;
@@ -112,7 +162,12 @@ export default function DashboardPage({ onNavigate }) {
       {backendOk === false && (
         <div className="dash-offline-banner">
           <XCircle size={16} />
-          Backend is offline or starting up — it will reconnect automatically once available.
+          <span>
+            Backend is offline or starting up — it will reconnect automatically once available.
+          </span>
+          <button className="dash-offline-config-btn" onClick={() => setShowConnModal(true)}>
+            <RefreshCcw size={11} /> Configure Connection
+          </button>
         </div>
       )}
 
@@ -291,6 +346,78 @@ export default function DashboardPage({ onNavigate }) {
           ))}
         </div>
       </section>
+
+      {/* ── Connection Modal ── */}
+      {showConnModal && (
+        <div className="conn-modal-overlay" onClick={() => setShowConnModal(false)}>
+          <div className="conn-modal animate-fade-up" onClick={(e) => e.stopPropagation()}>
+            <div className="conn-modal__header">
+              <h3 className="conn-modal__title">
+                <Globe size={18} color="var(--brand-primary)" />
+                Connection Settings
+              </h3>
+              <button className="conn-modal__close" onClick={() => setShowConnModal(false)}>
+                <XCircle size={18} />
+              </button>
+            </div>
+            
+            <div className="conn-modal__body">
+              <p className="conn-modal__desc">
+                If your backend is hosted on Render (which spins down after inactivity) or has a different URL, you can configure and test your custom backend connection here.
+              </p>
+              
+              <div className="conn-modal__field">
+                <label className="conn-modal__label">Backend Server URL</label>
+                <div className="conn-modal__input-group">
+                  <input
+                    type="text"
+                    className="conn-modal__input"
+                    placeholder="https://your-backend.onrender.com"
+                    value={testUrl}
+                    onChange={(e) => {
+                      setTestUrl(e.target.value);
+                      setTestStatus(null);
+                      setTestMsg('');
+                    }}
+                  />
+                  <button
+                    className="conn-modal__test-btn"
+                    onClick={handleTestConnection}
+                    disabled={!testUrl.trim() || testStatus === 'loading'}
+                  >
+                    {testStatus === 'loading' ? 'Testing...' : 'Test Connection'}
+                  </button>
+                </div>
+              </div>
+
+              {testStatus && (
+                <div className={`conn-modal__status conn-modal__status--${testStatus}`}>
+                  {testStatus === 'loading' && <RefreshCcw size={14} className="animate-spin" />}
+                  {testStatus === 'success' && <CheckCircle size={14} />}
+                  {testStatus === 'error' && <XOctagon size={14} />}
+                  <span>{testMsg}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="conn-modal__actions">
+              <button
+                className="conn-modal__btn conn-modal__btn--primary"
+                onClick={handleSaveConnection}
+                disabled={testStatus !== 'success'}
+              >
+                Save & Connect
+              </button>
+              <button
+                className="conn-modal__btn conn-modal__btn--secondary"
+                onClick={handleResetConnection}
+              >
+                Reset to Default
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
