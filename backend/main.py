@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 import httpx
 
+from api.routes.ui_test import ui_test_router
 
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -41,11 +42,24 @@ async def save_audit(
     result: "TestResult",
     status: str = "completed"
 ) -> None:
-    """Upsert a completed audit into MongoDB."""
+    """Upsert a completed audit into MongoDB and keep a local fallback copy."""
+    created_at = datetime.now(timezone.utc).isoformat()
+    history_cache[test_id] = {
+        "id":            test_id,
+        "createdAt":     created_at,
+        "inputType":     input_type,
+        "selectedTests": selected_tests,
+        "target":        target,
+        "grade":         result.grade,
+        "securityScore": result.securityScore,
+        "bugsFound":     result.bugsFound,
+        "status":        status,
+    }
+
     try:
         doc = {
             "_id":           test_id,
-            "createdAt":     datetime.now(timezone.utc).isoformat(),
+            "createdAt":     created_at,
             "inputType":     input_type,
             "selectedTests": selected_tests,
             "target":        target,
@@ -147,6 +161,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
 
+app.include_router(ui_test_router)
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     import traceback
@@ -160,7 +176,13 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+LOCAL_DEV_ORIGIN_REGEX = r"http://localhost:\d+|http://127\.0\.0\.1:\d+"
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     "X-Frame-Options": "DENY",
@@ -279,7 +301,7 @@ allow_all_origins = allowed_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=f"{LOCAL_DEV_ORIGIN_REGEX}|https://.*\\.vercel\\.app",
     allow_credentials=False if allow_all_origins else True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -334,6 +356,7 @@ class AssistantChatResponse(BaseModel):
 
 active_tests: dict = {}
 test_results: dict = {}
+history_cache: dict = {}
 
 CODE_UPLOAD_EXTENSIONS = (".zip", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".php", ".rb")
 CODE_INNER_EXTENSIONS = (".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".php", ".rb")
@@ -1020,29 +1043,46 @@ async def get_results(test_id: str):
 # ── Audit History endpoints ───────────────────────────────────────────────
 @app.get("/api/history")
 async def get_history():
-    cursor = audits_col.find(
-        {},
-        {"results": 0},          # exclude full results blob for speed
-    ).sort("createdAt", -1).limit(50)
     history = []
-    async for doc in cursor:
-        history.append({
-            "id":            doc["_id"],
-            "createdAt":     doc.get("createdAt"),
-            "inputType":     doc.get("inputType"),
-            "selectedTests": doc.get("selectedTests", []),
-            "target":        doc.get("target"),
-            "grade":         doc.get("grade"),
-            "securityScore": doc.get("securityScore"),
-            "bugsFound":     doc.get("bugsFound"),
-            "status":        doc.get("status", "completed"),
-        })
-    return history
+
+    try:
+        docs = await audits_col.find(
+            {},
+            {"results": 0},          # exclude full results blob for speed
+        ).sort("createdAt", -1).limit(50).to_list(length=50)
+        for doc in docs:
+            history.append({
+                "id":            doc["_id"],
+                "createdAt":     doc.get("createdAt"),
+                "inputType":     doc.get("inputType"),
+                "selectedTests": doc.get("selectedTests", []),
+                "target":        doc.get("target"),
+                "grade":         doc.get("grade"),
+                "securityScore": doc.get("securityScore"),
+                "bugsFound":     doc.get("bugsFound"),
+                "status":        doc.get("status", "completed"),
+            })
+    except Exception as exc:
+        print(f"[MongoDB] Failed to load history: {exc}")
+
+    merged = {item["id"]: item for item in history}
+    for cached in history_cache.values():
+        merged[cached["id"]] = cached
+
+    return sorted(
+        merged.values(),
+        key=lambda item: item.get("createdAt") or "",
+        reverse=True,
+    )[:50]
 
 
 @app.delete("/api/history")
 async def clear_history():
-    await audits_col.delete_many({})
+    try:
+        await audits_col.delete_many({})
+    except Exception as exc:
+        print(f"[MongoDB] Failed to clear history: {exc}")
+    history_cache.clear()
     return {"cleared": True}
 
 
