@@ -19,6 +19,19 @@ from pydantic import BaseModel, field_validator
 import httpx
 
 from api.routes.ui_test import ui_test_router
+from scan_stability import (
+    ensure_scan_queue,
+    init_scan_stream_state,
+    emit_user_event,
+    update_scan_progress,
+    emit_scan_status,
+    progress_event_stream,
+    sse_streaming_response,
+    run_background_scan,
+    groq_chat_with_fallback,
+    finalize_active_test,
+    finish_scan_success,
+)
 
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -325,9 +338,10 @@ class BugReport(BaseModel):
 
 class TestResult(BaseModel):
     grade: str
-    securityScore: int
-    bugsFound: int
-    bugs: List[BugReport]
+    securityScore: Optional[int] = None
+    bugsFound: Optional[int] = None
+    bugs: List[BugReport] = []
+    status: Optional[str] = None
 
 class AssistantChatMessage(BaseModel):
     role: str  # "user" | "assistant"
@@ -407,6 +421,57 @@ def score_to_grade(score: int) -> str:
     if score >= 60: return "C"
     if score >= 40: return "D"
     return "F"
+
+
+def build_cancelled_result() -> TestResult:
+    return TestResult(
+        grade="Cancelled",
+        securityScore=None,
+        bugsFound=None,
+        bugs=[],
+        status="cancelled",
+    )
+
+
+def normalize_test_result(result: TestResult, status: str = "completed") -> TestResult:
+    """Cancelled scans must not expose scores, bug counts, or findings."""
+    st = (status or "completed").lower()
+    grade_cancelled = (result.grade or "").lower().startswith("cancel")
+    if st == "cancelled" or grade_cancelled:
+        return build_cancelled_result()
+    return result.model_copy(update={"status": st})
+
+
+async def fetch_test_result(test_id: str) -> TestResult:
+    if not test_id or not test_id.strip():
+        raise HTTPException(status_code=400, detail="Invalid report ID")
+
+    status = "completed"
+    result: Optional[TestResult] = None
+
+    if test_id in test_results:
+        result = test_results[test_id]
+
+    if test_id in history_cache:
+        status = history_cache[test_id].get("status", status)
+    if test_id in active_tests:
+        active_status = active_tests[test_id].get("status")
+        if active_status:
+            status = active_status
+
+    if result is not None:
+        return normalize_test_result(result, status)
+
+    doc = await audits_col.find_one({"_id": test_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Report not found")
+        
+    if "results" not in doc:
+        raise HTTPException(status_code=404, detail="Report results are incomplete or corrupted")
+
+    status = doc.get("status", "completed")
+    result = TestResult(**doc["results"])
+    return normalize_test_result(result, status)
 
 
 def compute_score(bugs: list) -> int:
@@ -619,25 +684,23 @@ async def start_test(
         "status":   "running",
         "progress": 0,
         "logs":     [],
+        "user_events": [],
+        "sse_seen_keys": set(),
         "config":   {
             "inputType":     inputType,
             "selectedTests": selected,
             "target":        file.filename or "uploaded file",
         },
     }
-
-    background_tasks.add_task(
-        run_analysis, test_id, temp_dir, upload_path, schema_path
+    init_scan_stream_state(active_tests, test_id)
+    ensure_scan_queue(test_id)
+    asyncio.create_task(
+        run_background_scan(run_analysis, test_id, temp_dir, upload_path, schema_path)
     )
     return {"testId": test_id}
 
 
 async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: Optional[str]):
-    def log(msg: str, pct: int = None):
-        active_tests[test_id]["logs"].append(msg)
-        if pct is not None:
-            active_tests[test_id]["progress"] = pct
-
     def is_cancelled() -> bool:
         return active_tests.get(test_id, {}).get("status") == "cancelled"
 
@@ -653,44 +716,57 @@ async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: 
         input_type     = active_tests[test_id]["config"]["inputType"]
         selected_tests = active_tests[test_id]["config"]["selectedTests"]
 
-        
-        log("Inspecting uploaded archive...", 10)
-        await asyncio.sleep(0.5)
+        await emit_user_event(
+            active_tests, test_id, "Scan initialized", 2,
+            event_key="scan_initialized", log_type="info", event="started",
+        )
+        await emit_user_event(
+            active_tests, test_id, "Target validation started", 8,
+            event_key="target_validation_started", log_type="info",
+        )
+        update_scan_progress(active_tests, test_id, 10)
+        await asyncio.sleep(0)
         if abort_if_cancelled():
             return
 
-        code_contents = []
+        def _read_upload_files() -> list[str]:
+            contents: list[str] = []
 
-        
-        def read_files(path: str, extensions: tuple, tag: str):
-            if zipfile.is_zipfile(path):
-                with zipfile.ZipFile(path, "r") as zr:
-                    for info in zr.infolist():
-                        if info.is_dir() or not info.filename.lower().endswith(extensions):
-                            continue
-                        with zr.open(info, "r") as fh:
-                            content = fh.read().decode("utf-8", errors="ignore")
-                        code_contents.append(f"--- [{tag.upper()}] {info.filename} ---\n{content}\n")
+            def read_files(path: str, extensions: tuple, tag: str):
+                if zipfile.is_zipfile(path):
+                    with zipfile.ZipFile(path, "r") as zr:
+                        for info in zr.infolist():
+                            if info.is_dir() or not info.filename.lower().endswith(extensions):
+                                continue
+                            with zr.open(info, "r") as fh:
+                                content = fh.read().decode("utf-8", errors="ignore")
+                            contents.append(f"--- [{tag.upper()}] {info.filename} ---\n{content}\n")
+                else:
+                    fname = os.path.basename(path)
+                    if fname.lower().endswith(extensions):
+                        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                            contents.append(f"--- [{tag.upper()}] {fname} ---\n{fh.read()}\n")
+
+            if input_type == "codebase":
+                read_files(zip_path, CODE_INNER_EXTENSIONS, "code")
+            elif input_type == "database":
+                read_files(zip_path, SCHEMA_INNER_EXTENSIONS, "schema")
             else:
-                fname = os.path.basename(path)
-                if fname.lower().endswith(extensions):
-                    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                        code_contents.append(f"--- [{tag.upper()}] {fname} ---\n{fh.read()}\n")
+                read_files(zip_path, CODE_INNER_EXTENSIONS, "code")
+                if schema_path:
+                    read_files(schema_path, SCHEMA_INNER_EXTENSIONS, "schema")
+            return contents
 
-        if input_type == "codebase":
-            read_files(zip_path, CODE_INNER_EXTENSIONS, "code")
-        elif input_type == "database":
-            read_files(zip_path, SCHEMA_INNER_EXTENSIONS, "schema")
-        else:  # both
-            read_files(zip_path, CODE_INNER_EXTENSIONS, "code")
-            if schema_path:
-                read_files(schema_path, SCHEMA_INNER_EXTENSIONS, "schema")
+        code_contents = await asyncio.to_thread(_read_upload_files)
 
         if not code_contents:
             raise Exception("No analysable files found in the uploaded archive.")
 
-        log(f"Found {len(code_contents)} file(s). Building analysis context...", 30)
-        await asyncio.sleep(0.4)
+        await emit_user_event(
+            active_tests, test_id, "Target validated", 25,
+            event_key="target_validated", log_type="success",
+        )
+        update_scan_progress(active_tests, test_id, 30)
         if abort_if_cancelled():
             return
 
@@ -771,8 +847,19 @@ async def run_analysis(test_id: str, temp_dir: str, zip_path: str, schema_path: 
         else:
             subject = "codebase (may include Python, JavaScript, TypeScript, Java, Go, PHP or Ruby)"
 
-        log(f"Running {len(active_suites)} test suite(s): {', '.join(selected_tests)}", 50)
-        await asyncio.sleep(0.4)
+        await emit_user_event(
+            active_tests, test_id, "Security analysis running", 40,
+            event_key="security_analysis_running", log_type="warning",
+        )
+        await emit_user_event(
+            active_tests, test_id, "Stability analysis running", 45,
+            event_key="stability_analysis_running", log_type="warning",
+        )
+        await emit_user_event(
+            active_tests, test_id, "Performance analysis running", 50,
+            event_key="performance_analysis_running", log_type="warning",
+        )
+        update_scan_progress(active_tests, test_id, 55)
         if abort_if_cancelled():
             return
         prompt = f"""You are an expert software quality engineer performing a targeted audit.
@@ -825,8 +912,11 @@ Rules:
 {all_code}"""
 
        
-        log("Sending to Groq AI (llama-3.3-70b-versatile)...", 65)
-        await asyncio.sleep(0.3)
+        await emit_user_event(
+            active_tests, test_id, "AI analysis started", 65,
+            event_key="ai_analysis_started", log_type="info",
+        )
+        update_scan_progress(active_tests, test_id, 68)
         if abort_if_cancelled():
             return
 
@@ -839,46 +929,44 @@ Rules:
             )
 
         client = Groq(api_key=groq_key)
-        
         models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
-        response = None
-        for i, model_name in enumerate(models_to_try):
-            try:
-                if i > 0:
-                    log(f"Sending to Groq AI ({model_name})...", 65)
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a strict technical auditor. "
-                                "You ONLY report issues matching the requested test categories. "
-                                "Output ONLY raw valid JSON. No markdown, no extra text."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0,
-                    max_tokens=3500,
-                )
-                break
-            except Exception as e:
-                err_str = str(e).lower()
-                if ("rate_limit" in err_str or "429" in err_str or "too many requests" in err_str) and i < len(models_to_try) - 1:
-                    log(f"Rate limit hit for {model_name}. Falling back...", 65)
-                    continue
-                raise e
+        groq_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict technical auditor. "
+                    "You ONLY report issues matching the requested test categories. "
+                    "Output ONLY raw valid JSON. No markdown, no extra text."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        async def _on_retry(model_name: str):
+            update_scan_progress(active_tests, test_id, 68)
+
+        response = await groq_chat_with_fallback(
+            client,
+            models_to_try,
+            groq_messages,
+            max_tokens=3500,
+            on_model_retry=_on_retry,
+        )
 
         raw = response.choices[0].message.content or ""
-        log("Parsing AI response...", 85)
-        await asyncio.sleep(0.3)
+        await emit_user_event(
+            active_tests, test_id, "AI analysis completed", 80,
+            event_key="ai_analysis_completed", log_type="success",
+        )
+        update_scan_progress(active_tests, test_id, 85)
         if abort_if_cancelled():
             return
 
         result_dict = extract_json_robust(raw)
 
-    
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
+
         for bug in result_dict.get("bugs", []):
             if isinstance(bug.get("reproduction"), list):
                 bug["reproduction"] = "\n".join(str(s) for s in bug["reproduction"])
@@ -895,11 +983,10 @@ Rules:
             if normalise_type(b.get("type", "")) in {t.title() for t in allowed_set}
             or b.get("type", "") in allowed_set
         ]
-        removed = len(original_bugs) - len(filtered_bugs)
-        if removed > 0:
-            log(f"Filtered out {removed} bug(s) outside selected test scope.", 90)
-
         result_dict["bugs"] = filtered_bugs
+
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
 
         # Score comes from the AI's own severity assignments via the rubric in the prompt.
         # Python only overrides the grade letter (deterministic mapping).
@@ -912,24 +999,32 @@ Rules:
         result_dict["grade"]         = score_to_grade(score)
         result_dict["bugsFound"]     = len(filtered_bugs)
 
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
+
         result_obj = TestResult(**result_dict)
         test_results[test_id] = result_obj
 
         # Persist to MongoDB
         target_label = active_tests[test_id]["config"].get("target", "uploaded file")
+        await emit_user_event(
+            active_tests, test_id, "Report generation started", 92,
+            event_key="report_generation_started", log_type="info",
+        )
         await save_audit(test_id, input_type, selected_tests, target_label, result_obj)
+        update_scan_progress(active_tests, test_id, 95)
 
-        for bug in filtered_bugs:
-            log(f"[{bug.get('severity', 'LOW').upper()}] {bug.get('title', 'Issue found')}", 95)
-
-        log(f"Report ready: {len(filtered_bugs)} issue(s) found.", 100)
-        active_tests[test_id]["status"] = "completed"
+        await finish_scan_success(active_tests, test_id)
+        finalize_active_test(active_tests, test_id)
 
     except Exception as exc:
         if active_tests.get(test_id, {}).get("status") == "cancelled":
             return
-        log(f"ERROR: {exc}", 100)
-        active_tests[test_id]["status"] = "completed"
+        await emit_user_event(
+            active_tests, test_id, "Scan failed", 100,
+            event_key="scan_failed", log_type="error", event="error", status="failed",
+        )
+        active_tests[test_id]["status"] = "failed"
         test_results[test_id] = TestResult(
             grade="F",
             securityScore=0,
@@ -950,23 +1045,7 @@ Rules:
 
 @app.get("/api/test/progress/{test_id}")
 async def get_progress(test_id: str):
-    async def stream():
-        while True:
-            if test_id not in active_tests:
-                yield 'data: {"error": "test not found"}\n\n'
-                break
-            t = active_tests[test_id]
-            payload = json.dumps({
-                "progress":   t["progress"],
-                "status":     t["status"],
-                "latest_log": t["logs"][-1] if t["logs"] else "",
-            })
-            yield f"data: {payload}\n\n"
-            if t["status"] in {"completed", "cancelled"}:
-                break
-            await asyncio.sleep(1)
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return sse_streaming_response(progress_event_stream(test_id, active_tests))
 
 @app.post("/cancel-scan/{scan_id}")
 async def cancel_test(scan_id: str):
@@ -976,22 +1055,26 @@ async def cancel_test(scan_id: str):
     if active_tests[test_id]["status"] == "completed":
         return {"status": "completed"}
     active_tests[test_id]["status"] = "cancelled"
-    if not active_tests[test_id]["logs"] or active_tests[test_id]["logs"][-1] != "Scan cancelled by user.":
-        active_tests[test_id]["logs"].append("Scan cancelled by user.")
-    
+    await emit_user_event(
+        active_tests,
+        test_id,
+        "Scan cancelled",
+        active_tests[test_id].get("progress"),
+        event_key="scan_cancelled",
+        log_type="warning",
+        event="cancelled",
+        status="cancelled",
+    )
+
     t = active_tests[test_id]
     target_label = t.get("config", {}).get("target", "uploaded file")
     input_type = t.get("config", {}).get("inputType", "unknown")
     selected_tests = t.get("config", {}).get("selectedTests", [])
     
-    empty_result = TestResult(
-        grade="Cancelled",
-        securityScore=0,
-        bugsFound=0,
-        bugs=[]
-    )
+    empty_result = build_cancelled_result()
+    test_results[test_id] = empty_result
     await save_audit(test_id, input_type, selected_tests, target_label, empty_result, status="cancelled")
-    
+
     return {"status": "cancelled"}
 
 
@@ -1030,14 +1113,7 @@ async def invite_team_member(
 
 @app.get("/api/test/results/{test_id}", response_model=TestResult)
 async def get_results(test_id: str):
-    # Try in-memory first (hot path — avoids DB round-trip)
-    if test_id in test_results:
-        return test_results[test_id]
-    # Fall back to MongoDB (survives server restarts)
-    doc = await audits_col.find_one({"_id": test_id})
-    if doc:
-        return TestResult(**doc["results"])
-    raise HTTPException(status_code=404, detail="Report not found")
+    return await fetch_test_result(test_id)
 
 
 # ── Audit History endpoints ───────────────────────────────────────────────
@@ -1066,8 +1142,11 @@ async def get_history():
         print(f"[MongoDB] Failed to load history: {exc}")
 
     merged = {item["id"]: item for item in history}
-    for cached in history_cache.values():
-        merged[cached["id"]] = cached
+    # Only merge cache entries that aren't already fully in the DB 
+    # to prevent stale cache entries overriding DB state or deletions
+    for cached_id, cached in history_cache.items():
+        if cached_id not in merged or cached.get("status") in ["running", "cancelled"]:
+            merged[cached_id] = cached
 
     return sorted(
         merged.values(),
@@ -1088,25 +1167,26 @@ async def clear_history():
 
 @app.get("/api/history/{test_id}", response_model=TestResult)
 async def get_history_result(test_id: str):
-    if test_id in test_results:
-        return test_results[test_id]
-    doc = await audits_col.find_one({"_id": test_id})
-    if doc:
-        return TestResult(**doc["results"])
-    raise HTTPException(status_code=404, detail="Report not found")
+    return await fetch_test_result(test_id)
 
 
 @app.delete("/api/history/{test_id}")
 async def delete_history_result(test_id: str):
+    found_in_mem = False
     if test_id in test_results:
         del test_results[test_id]
+        found_in_mem = True
     if test_id in active_tests:
         del active_tests[test_id]
+        found_in_mem = True
+    if test_id in history_cache:
+        del history_cache[test_id]
+        found_in_mem = True
         
     result = await audits_col.delete_one({"_id": test_id})
-    if result.deleted_count == 0 and test_id not in test_results:
+    if result.deleted_count == 0 and not found_in_mem:
         raise HTTPException(status_code=404, detail="Report not found")
-    return {"deleted": True}
+    return {"deleted": True, "id": test_id}
 
 
 # ══ URL Scan ═════════════════════════════════════════════════════
@@ -1220,19 +1300,17 @@ async def start_url_test(
         "status":   "running",
         "progress": 0,
         "logs":     [],
+        "user_events": [],
+        "sse_seen_keys": set(),
         "config":   {"inputType": "url", "selectedTests": selected, "target": targetUrl},
     }
-
-    background_tasks.add_task(run_url_analysis, test_id, targetUrl, selected)
+    init_scan_stream_state(active_tests, test_id)
+    ensure_scan_queue(test_id)
+    asyncio.create_task(run_background_scan(run_url_analysis, test_id, targetUrl, selected))
     return {"testId": test_id}
 
 
 async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
-    def log(msg: str, pct: int = None):
-        active_tests[test_id]["logs"].append(msg)
-        if pct is not None:
-            active_tests[test_id]["progress"] = pct
-
     def is_cancelled() -> bool:
         return active_tests.get(test_id, {}).get("status") == "cancelled"
 
@@ -1262,7 +1340,19 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
     }
 
     try:
-        log(f"Connecting to {target_url}...", 10)
+        await emit_user_event(
+            active_tests, test_id, "Scan initialized", 2,
+            event_key="scan_initialized", log_type="info", event="started",
+        )
+        await emit_user_event(
+            active_tests, test_id, "Target validation started", 6,
+            event_key="target_validation_started", log_type="info",
+        )
+        await emit_user_event(
+            active_tests, test_id, "URL crawling started", 12,
+            event_key="url_crawling_started", log_type="warning",
+        )
+        update_scan_progress(active_tests, test_id, 15)
         if abort_if_cancelled():
             return
 
@@ -1278,10 +1368,14 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
         ) as client:
 
             # ── Base request ──────────────────────────────────────────
-            log("Fetching main page and response headers...", 18)
+            update_scan_progress(active_tests, test_id, 18)
             if abort_if_cancelled():
                 return
             resp = await client.get(target_url, headers=headers_to_send)
+            await emit_user_event(
+                active_tests, test_id, "Target validated", 22,
+                event_key="target_validated", log_type="success",
+            )
             resp_headers = dict(resp.headers)
             status_code  = resp.status_code
 
@@ -1295,7 +1389,11 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             findings["response_headers"] = resp_headers
 
             # ── Security headers ──────────────────────────────────────
-            log("Auditing security headers...", 28)
+            await emit_user_event(
+                active_tests, test_id, "Security analysis running", 30,
+                event_key="security_analysis_running", log_type="warning",
+            )
+            update_scan_progress(active_tests, test_id, 35)
             if abort_if_cancelled():
                 return
             security_headers_check = {
@@ -1312,7 +1410,7 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             findings["security_headers"] = security_headers_check
 
             # ── Cookie security ────────────────────────────────────────
-            log("Inspecting cookies...", 36)
+            update_scan_progress(active_tests, test_id, 38)
             if abort_if_cancelled():
                 return
             cookies_found = []
@@ -1342,7 +1440,7 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             }
 
             # ── CORS ─────────────────────────────────────────────────
-            log("Checking CORS configuration...", 44)
+            update_scan_progress(active_tests, test_id, 42)
             if abort_if_cancelled():
                 return
             cors_resp = await client.options(
@@ -1363,7 +1461,7 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             }
 
             # ── Exposed sensitive paths ────────────────────────────────
-            log("Probing sensitive paths...", 54)
+            update_scan_progress(active_tests, test_id, 48)
             if abort_if_cancelled():
                 return
             resolved_url = urlparse(str(resp.url))
@@ -1377,7 +1475,9 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             path_results = {}
             root_is_html = "text/html" in resp_headers.get("content-type", "").lower()
             root_fingerprint = compact_body_fingerprint(resp.text) if root_is_html else ""
-            for path in sensitive_paths:
+            for i, path in enumerate(sensitive_paths):
+                if i % 2 == 0:
+                    await asyncio.sleep(0)
                 try:
                     pr = await client.get(base + path, headers=headers_to_send)
                     content_type = pr.headers.get("content-type", "")
@@ -1409,7 +1509,11 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             }
 
             # ── Rate limiting ─────────────────────────────────────────
-            log("Testing rate limiting...", 64)
+            await emit_user_event(
+                active_tests, test_id, "Stability analysis running", 58,
+                event_key="stability_analysis_running", log_type="warning",
+            )
+            update_scan_progress(active_tests, test_id, 62)
             if abort_if_cancelled():
                 return
             login_paths = ["/login", "/api/login", "/api/auth/login", "/auth/login", "/signin"]
@@ -1441,55 +1545,65 @@ async def run_url_analysis(test_id: str, target_url: str, selected_tests: list):
             }
 
         # ── SSL check (sync, separate context) ──────────────────────
-        log("Checking SSL/TLS certificate...", 72)
+        await emit_user_event(
+            active_tests, test_id, "Performance analysis running", 68,
+            event_key="performance_analysis_running", log_type="warning",
+        )
+        update_scan_progress(active_tests, test_id, 72)
         if abort_if_cancelled():
             return
-        import socket
-        ssl_info = {}
-        parsed = urlparse(target_url)
-        if target_is_local:
-            ssl_info = {
-                "applicable": False,
-                "valid": None,
-                "note": "Skipped for localhost/loopback development target.",
-            }
-        elif parsed.scheme != "https":
-            ssl_info = {
-                "applicable": True,
-                "valid": False,
-                "error": "Target URL uses HTTP; no TLS certificate was presented.",
-            }
-        else:
+
+        def _inspect_ssl() -> dict:
+            import socket
+            import datetime as dt
+            info: dict = {}
+            parsed = urlparse(target_url)
+            if target_is_local:
+                return {
+                    "applicable": False,
+                    "valid": None,
+                    "note": "Skipped for localhost/loopback development target.",
+                }
+            if parsed.scheme != "https":
+                return {
+                    "applicable": True,
+                    "valid": False,
+                    "error": "Target URL uses HTTP; no TLS certificate was presented.",
+                }
             try:
-                host    = parsed.hostname
-                port    = parsed.port or 443
-                ctx     = ssl.create_default_context()
-                conn    = ctx.wrap_socket(socket.socket(), server_hostname=host)
+                host = parsed.hostname
+                port = parsed.port or 443
+                ctx = ssl.create_default_context()
+                conn = ctx.wrap_socket(socket.socket(), server_hostname=host)
                 conn.settimeout(8)
                 conn.connect((host, port))
-                cert        = conn.getpeercert()
+                cert = conn.getpeercert()
                 tls_version = conn.version() if hasattr(conn, "version") else "unknown"
                 conn.close()
-                import datetime
-                expiry  = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                days_left = (expiry - datetime.datetime.utcnow()).days
-                ssl_info = {
-                    "applicable":       True,
-                    "valid":            True,
-                    "subject":          dict(x[0] for x in cert.get("subject", [])),
-                    "issuer":           dict(x[0] for x in cert.get("issuer", [])),
-                    "expires":          cert["notAfter"],
+                expiry = dt.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                days_left = (expiry - dt.datetime.utcnow()).days
+                return {
+                    "applicable": True,
+                    "valid": True,
+                    "subject": dict(x[0] for x in cert.get("subject", [])),
+                    "issuer": dict(x[0] for x in cert.get("issuer", [])),
+                    "expires": cert["notAfter"],
                     "days_until_expiry": days_left,
-                    "tls_version":      tls_version,
+                    "tls_version": tls_version,
                 }
             except ssl.SSLCertVerificationError as e:
-                ssl_info = {"applicable": True, "valid": False, "error": str(e)}
+                return {"applicable": True, "valid": False, "error": str(e)}
             except Exception as e:
-                ssl_info = {"applicable": True, "valid": None, "error": str(e), "note": "Could not inspect certificate"}
-        findings["ssl"] = ssl_info
+                return {"applicable": True, "valid": None, "error": str(e), "note": "Could not inspect certificate"}
+
+        findings["ssl"] = await asyncio.to_thread(_inspect_ssl)
 
         # ── Build AI prompt ──────────────────────────────────────────
-        log("Sending findings to AI for analysis...", 80)
+        await emit_user_event(
+            active_tests, test_id, "AI analysis started", 75,
+            event_key="ai_analysis_started", log_type="info",
+        )
+        update_scan_progress(active_tests, test_id, 78)
         if abort_if_cancelled():
             return
 
@@ -1554,65 +1668,73 @@ Rules:
             raise Exception("GROQ_API_KEY not configured in backend/.env")
 
         client_groq = Groq(api_key=groq_key)
-        
         models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
-        response = None
-        for i, model_name in enumerate(models_to_try):
-            try:
-                if i == 0:
-                    log(f"Sending to Groq AI ({model_name})...", 85)
-                else:
-                    log(f"Sending to Groq AI ({model_name})...", 85)
-                
-                response = client_groq.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "You are a strict web security auditor. Output ONLY raw valid JSON. No markdown."},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    temperature=0,
-                    max_tokens=3500,
-                )
-                break
-            except Exception as e:
-                err_str = str(e).lower()
-                if ("rate_limit" in err_str or "429" in err_str or "too many requests" in err_str) and i < len(models_to_try) - 1:
-                    log(f"Rate limit hit for {model_name}. Falling back...", 85)
-                    continue
-                raise e
+        update_scan_progress(active_tests, test_id, 82)
+
+        async def _url_retry(model_name: str):
+            update_scan_progress(active_tests, test_id, 82)
+
+        response = await groq_chat_with_fallback(
+            client_groq,
+            models_to_try,
+            [
+                {"role": "system", "content": "You are a strict web security auditor. Output ONLY raw valid JSON. No markdown."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=3500,
+            on_model_retry=_url_retry,
+        )
 
         raw = response.choices[0].message.content or ""
-        log("Parsing AI analysis...", 90)
+        await emit_user_event(
+            active_tests, test_id, "AI analysis completed", 88,
+            event_key="ai_analysis_completed", log_type="success",
+        )
+        update_scan_progress(active_tests, test_id, 90)
 
         result_dict = extract_json_robust(raw)
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
+
         for bug in result_dict.get("bugs", []):
             if isinstance(bug.get("reproduction"), list):
                 bug["reproduction"] = "\n".join(str(s) for s in bug["reproduction"])
 
         result_dict = filter_url_false_positives(result_dict, findings)
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
+
         score = compute_score(result_dict.get("bugs", []))
 
         result_dict["securityScore"] = score
         result_dict["grade"]         = score_to_grade(score)
         result_dict["bugsFound"]     = len(result_dict.get("bugs", []))
 
+        if active_tests.get(test_id, {}).get("status") == "cancelled":
+            return
+
         url_result = TestResult(**result_dict)
         test_results[test_id] = url_result
 
         # Persist to MongoDB
+        await emit_user_event(
+            active_tests, test_id, "Report generation started", 92,
+            event_key="report_generation_started", log_type="info",
+        )
         await save_audit(test_id, "url", selected_tests, target_url, url_result)
+        update_scan_progress(active_tests, test_id, 95)
 
-        for bug in result_dict.get("bugs", []):
-            log(f"[{bug.get('severity', 'LOW').upper()}] {bug.get('title', 'Issue found')}", 95)
-
-        log(f"URL audit complete: {result_dict['bugsFound']} issue(s) found.", 100)
-        active_tests[test_id]["status"] = "completed"
+        await finish_scan_success(active_tests, test_id)
+        finalize_active_test(active_tests, test_id)
 
     except Exception as exc:
         if active_tests.get(test_id, {}).get("status") == "cancelled":
             return
-        log(f"ERROR: {exc}", 100)
-        active_tests[test_id]["status"] = "completed"
+        await emit_user_event(
+            active_tests, test_id, "Scan failed", 100,
+            event_key="scan_failed", log_type="error", event="error", status="failed",
+        )
+        active_tests[test_id]["status"] = "failed"
         test_results[test_id] = TestResult(
             grade="F", securityScore=0, bugsFound=1,
             bugs=[BugReport(
@@ -1662,7 +1784,98 @@ async def delete_template(template_id: str):
 
 # ══ AI Security Assistant ════════════════════════════════════════════════
 
+# ── Off-topic / domain filter (lightweight, runs BEFORE the LLM call) ────
+_DOMAIN_KEYWORDS = [
+    # Security & vulnerabilities
+    "security", "vulnerability", "exploit", "attack", "threat", "owasp",
+    "xss", "sql injection", "sqli", "csrf", "ssrf", "rce", "idor",
+    "injection", "privilege", "escalation", "brute force", "dos", "ddos",
+    "malware", "phishing", "ransomware", "cve", "cvss", "zero-day",
+    "pentest", "penetration", "vapt", "sast", "dast", "iast",
+    # Auth & crypto
+    "auth", "authentication", "authorization", "token", "jwt", "oauth",
+    "session", "cookie", "password", "hash", "encrypt", "decrypt", "tls",
+    "ssl", "certificate", "cors", "csp", "header", "https",
+    # Testing & QA
+    "test", "testing", "unit test", "integration test", "e2e",
+    "end-to-end", "regression", "qa", "quality", "bug", "defect",
+    "debug", "debugging", "breakpoint", "stack trace", "traceback",
+    "error handling", "exception", "assertion", "coverage",
+    "playwright", "selenium", "pytest", "jest", "mocha", "cypress",
+    # Scans, reports, platform
+    "scan", "report", "grade", "score", "audit", "finding", "remediat",
+    "fix", "patch", "mitigation", "recommendation", "severity",
+    "high", "medium", "low", "critical",
+    "testops", "testpilot", "platform", "dashboard", "export", "pdf",
+    "template", "history", "rerun", "re-run", "cancel", "upload",
+    "download", "needs review",
+    # Code & development
+    "code", "coding", "program", "function", "api", "endpoint",
+    "database", "schema", "query", "sql", "index", "migration",
+    "orm", "model", "validation", "sanitiz", "encod",
+    "python", "javascript", "typescript", "java", "go", "rust",
+    "node", "react", "fastapi", "django", "flask", "express",
+    # DevOps & infra
+    "docker", "container", "ci/cd", "pipeline", "deploy", "kubernetes",
+    "nginx", "server", "config", "environment", "env", "secret",
+    "git", "repo", "linux", "firewall", "log", "monitor",
+    # Performance & stability
+    "performance", "latency", "memory", "cpu", "load", "throughput",
+    "bottleneck", "profil", "benchmark", "stability", "crash",
+    "timeout", "retry", "rate limit", "throttl",
+    # Casual / greetings (don't block these)
+    "hello", "hi", "hey", "thanks", "thank you", "help",
+    "how are you", "who are you", "what can you",
+]
+
+_REDIRECT_MSG = (
+    "I'm optimized for **TestOps-related assistance** — security analysis, "
+    "scan reports, vulnerability remediation, testing workflows, debugging, "
+    "and platform usage help.\n\n"
+    "Feel free to ask me anything in those areas!"
+)
+
+
+def _is_off_topic(message: str) -> bool:
+    """Return True when the message is clearly outside the TestOps domain.
+
+    The check is intentionally lenient: if ANY domain keyword appears we
+    treat it as on-topic.  Only messages with zero overlap are redirected.
+    Short messages (≤3 words) are always allowed (greetings, follow-ups).
+    """
+    msg = message.lower().strip()
+    # Always allow very short messages (greetings, follow-ups like "yes", "explain more")
+    if len(msg.split()) <= 4:
+        return False
+    # Allow if any domain keyword is found
+    for kw in _DOMAIN_KEYWORDS:
+        if kw in msg:
+            return False
+    return True
+
+
 ASSISTANT_SYSTEM_PROMPT = """You are the AI Security Assistant built into TestPilot AI — a professional security audit and testing platform. You behave like a senior security engineer and product expert combined.
+
+## DOMAIN SCOPE
+
+You are a **domain-focused assistant**. Your expertise covers:
+- Security testing, vulnerability analysis, and remediation
+- Scan reports, grades, scores, and findings on this platform
+- QA / testing workflows (unit, integration, e2e, SAST, DAST)
+- Performance, stability, and debugging of software
+- Runtime monitoring, logging, and observability
+- Platform usage and help (how to run scans, export reports, templates, etc.)
+- Secure coding practices across languages
+- DevOps security (Docker, CI/CD, secrets management)
+- Database security, schema design, and query optimization
+
+If a user asks a question **clearly outside** these domains (e.g. general knowledge, trivia, homework, creative writing, recipes, geography, biology, etc.):
+- Do NOT provide a full answer.
+- Respond politely with a short redirect, for example:
+  "I'm optimized for TestOps-related assistance such as security analysis, scan reports, vulnerabilities, testing workflows, and debugging support. Feel free to ask me anything in those areas!"
+- Keep the redirect to 1–2 sentences. Do not elaborate on the off-topic subject.
+
+Do NOT block casual, friendly, or ambiguous messages. Greetings, follow-ups, and thank-yous are fine.
 
 ## CORE BEHAVIOUR
 
@@ -1836,6 +2049,10 @@ async def assistant_chat(req: AssistantRequest):
         if m.role == "user" and m.content.strip():
             last_user_msg = m.content.strip()
             break
+
+    # ── Lightweight domain filter (runs BEFORE LLM to save tokens) ───────
+    if _is_off_topic(last_user_msg):
+        return {"answer": _REDIRECT_MSG}
 
     intent = classify_intent(last_user_msg)
     max_tokens = TOKEN_BUDGETS.get(intent, 700)

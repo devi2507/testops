@@ -1,9 +1,11 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import api from '../services/api';
 
 const ActiveScanContext = createContext(null);
 
 export function ActiveScanProvider({ children }) {
+  const location = useLocation();
   const [activeScan, setActiveScan] = useState(() => {
     try {
       const stored = localStorage.getItem('testops_active_scan');
@@ -13,6 +15,9 @@ export function ActiveScanProvider({ children }) {
     }
   });
 
+  const activeScanRef = useRef(activeScan);
+  activeScanRef.current = activeScan;
+
   useEffect(() => {
     if (activeScan) {
       localStorage.setItem('testops_active_scan', JSON.stringify(activeScan));
@@ -21,48 +26,78 @@ export function ActiveScanProvider({ children }) {
     }
   }, [activeScan]);
 
-  // Global background listener for running scans
+  const updateScanStatus = useCallback((status, progress) => {
+    setActiveScan((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        currentStatus: status !== undefined ? status : prev.currentStatus,
+        currentProgress: progress !== undefined ? progress : prev.currentProgress,
+      };
+    });
+  }, []);
+
+  // Navbar progress listener — skip on live scan page (ProgressConsole owns that stream)
   useEffect(() => {
-    if (activeScan && activeScan.currentStatus === 'running') {
-      const es = new EventSource(`${api.baseUrl}/api/test/progress/${activeScan.scanId}`);
-      
-      es.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.error) {
-            updateScanStatus('error');
-            es.close();
-            return;
-          }
+    if (location.pathname.includes('/scan/live')) return;
 
-          if (data.status === 'completed') {
+    const scan = activeScanRef.current;
+    if (!scan || scan.currentStatus !== 'running') return;
+
+    const es = new EventSource(`${api.baseUrl}/api/test/progress/${scan.scanId}`);
+    const terminalSeen = { done: false };
+
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.error) {
+          if (!terminalSeen.done) {
+            terminalSeen.done = true;
+            updateScanStatus('error');
+          }
+          es.close();
+          return;
+        }
+
+        if (data.event === 'heartbeat') {
+          if (typeof data.progress === 'number') {
+            updateScanStatus('running', data.progress);
+          }
+          return;
+        }
+
+        if (data.status === 'completed' && data.event_key === 'scan_completed') {
+          if (!terminalSeen.done) {
+            terminalSeen.done = true;
             updateScanStatus('completed', 100);
-            es.close();
-          } else if (data.status === 'cancelled') {
-            updateScanStatus('cancelled');
-            es.close();
-          } else if (data.status === 'failed') {
-            updateScanStatus('error');
-            es.close();
-          } else {
-            // Update progress without triggering full reload of the connection
-            // since we only depend on scanId and currentStatus
-            updateScanStatus('running', data.progress || 0);
           }
-        } catch (err) {}
-      };
+          es.close();
+        } else if (data.status === 'cancelled') {
+          if (!terminalSeen.done) {
+            terminalSeen.done = true;
+            updateScanStatus('cancelled');
+          }
+          es.close();
+        } else if (data.status === 'failed') {
+          if (!terminalSeen.done) {
+            terminalSeen.done = true;
+            updateScanStatus('error');
+          }
+          es.close();
+        } else if (data.status === 'running' && typeof data.progress === 'number') {
+          updateScanStatus('running', data.progress);
+        }
+      } catch {
+        /* ignore malformed frames */
+      }
+    };
 
-      es.onerror = () => {
-        es.close();
-      };
+    es.onerror = () => es.close();
 
-      return () => {
-        es.close();
-      };
-    }
-  }, [activeScan?.scanId, activeScan?.currentStatus]);
+    return () => es.close();
+  }, [activeScan?.scanId, activeScan?.currentStatus, location.pathname, updateScanStatus]);
 
-  const startActiveScan = (scanId, targetName, scanType) => {
+  const startActiveScan = useCallback((scanId, targetName, scanType) => {
     setActiveScan({
       scanId,
       targetName,
@@ -72,22 +107,11 @@ export function ActiveScanProvider({ children }) {
       currentProgress: 0,
       routePath: `/scan/live/${scanId}`,
     });
-  };
+  }, []);
 
-  const updateScanStatus = (status, progress) => {
-    setActiveScan((prev) => {
-      if (!prev) return null;
-      return {
-        ...prev,
-        currentStatus: status !== undefined ? status : prev.currentStatus,
-        currentProgress: progress !== undefined ? progress : prev.currentProgress,
-      };
-    });
-  };
-
-  const clearActiveScan = () => {
+  const clearActiveScan = useCallback(() => {
     setActiveScan(null);
-  };
+  }, []);
 
   return (
     <ActiveScanContext.Provider

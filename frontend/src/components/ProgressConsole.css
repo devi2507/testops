@@ -382,8 +382,15 @@ html[data-theme="light"] .tdot--green { background: #ddd; }
 .log-row__text   { flex: 1; word-break: break-word; }
 
 .log-row--error   { background: var(--error-bg); }
+.log-row--warning { background: rgba(245, 158, 11, 0.08); }
 .log-row--success { background: var(--success-bg); }
+.log-row--info    { background: rgba(56, 189, 248, 0.08); }
 .log-row--ai      { background: var(--accent-subtle); }
+
+.log-row__status--success { color: var(--success); }
+.log-row__status--warning { color: var(--warning); }
+.log-row__status--error   { color: var(--error); }
+.log-row__status--info    { color: var(--info); }
 
 /* ── Cursor ── */
 .log-cursor { color: var(--accent); font-size: 0.95rem; }

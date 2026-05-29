@@ -9,7 +9,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import BackButton from '../components/BackButton';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
-import { isCancelled, isCompleted, needsReview } from '../services/scanUtils';
+import { isCancelled, isCompleted, needsReview, normalizeScanResult } from '../services/scanUtils';
 import '../styles/historyPage.css';
 
 const INPUT_ICON  = { codebase: Code, database: Database, both: Layers, url: Globe };
@@ -78,14 +78,29 @@ export default function HistoryPage({ onNavigate }) {
   const [preview, setPreview]     = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
-  const load = async () => {
+  const load = async (options = {}) => {
     setLoading(true);
-    try { setHistory(await api.getHistory()); }
-    catch { toast?.error('Could not load scan history.'); }
-    setLoading(false);
+    try { setHistory(await api.getHistory(options)); }
+    catch (e) { if (e.name !== 'AbortError') toast?.error('Could not load scan history.'); }
+    finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const abortCtrl = new AbortController();
+    load({ signal: abortCtrl.signal });
+
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    window.addEventListener('visibilitychange', handleFocus);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      abortCtrl.abort();
+      window.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, []);
 
   const viewMode = new URLSearchParams(location.search).get('view');
   
@@ -121,8 +136,11 @@ export default function HistoryPage({ onNavigate }) {
   const handleClear = async () => {
     if (!window.confirm('Delete all scan history? This cannot be undone.')) return;
     setClearing(true);
-    try { await api.clearHistory(); setHistory([]); }
-    catch { toast?.error('Could not clear scan history.'); }
+    try {
+      await api.clearHistory();
+      setHistory([]);
+      try { localStorage.removeItem('testops_current_report'); } catch (err) {}
+    } catch { toast?.error('Could not clear scan history.'); }
     setClearing(false);
   };
 
@@ -131,7 +149,7 @@ export default function HistoryPage({ onNavigate }) {
     setPreview({ summary: scan, details: null });
     try {
       const details = await api.getHistoryResult(scan.id);
-      setPreview({ summary: scan, details });
+      setPreview({ summary: scan, details: normalizeScanResult({ ...details, status: details.status ?? scan.status }) });
     } catch {
       setPreview({ summary: scan, details: null, error: 'Could not load report details.' });
       toast?.error('Could not load report details.');
@@ -341,6 +359,12 @@ export default function HistoryPage({ onNavigate }) {
                                 await api.deleteHistoryResult(scan.id);
                                 setHistory(h => h.filter(x => x.id !== scan.id));
                                 toast?.success('Scan deleted');
+                                try {
+                                  const cached = JSON.parse(localStorage.getItem('testops_current_report'));
+                                  if (cached && cached.id === scan.id) {
+                                    localStorage.removeItem('testops_current_report');
+                                  }
+                                } catch (err) {}
                               } catch {
                                 toast?.error('Failed to delete scan');
                               }
@@ -420,6 +444,11 @@ export default function HistoryPage({ onNavigate }) {
               <div className="hist-skeleton" />
             ) : preview.error ? (
               <div className="hist-empty hist-empty--compact">{preview.error}</div>
+            ) : isCancelled(preview.summary) ? (
+              <div className="hist-empty hist-empty--compact">
+                <p><strong>Scan Cancelled</strong></p>
+                <p>Scan was cancelled. No results were generated.</p>
+              </div>
             ) : (
               <>
                 <div className="hist-preview-stats">

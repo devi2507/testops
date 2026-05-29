@@ -34,6 +34,16 @@
   flex-shrink: 0;
 }
 
+.report-hero--cancelled {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning) 6%, var(--bg-card));
+}
+
+.report-grade-ring--cancelled {
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-elevated));
+}
+
 .report-grade-ring__letter {
   font-size: 1.7rem;
   font-weight: 800;
@@ -128,6 +138,22 @@
   align-items: center;
   padding: 22px;
   margin-bottom: 20px;
+}
+
+.score-intel--cancelled {
+  grid-template-columns: 72px 1fr;
+  gap: 16px;
+  align-items: center;
+}
+
+.score-intel__cancel-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--warning) 18%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
 }
 
 .score-ring {
@@ -414,6 +440,8 @@
   padding: 64px 24px;
   text-align: center;
 }
+
+.report-empty--cancelled h2 { color: var(--warning); }
 
 .report-empty h2 { font-size: 1.1rem; color: var(--success); }
 .report-empty p  { font-size: 0.85rem; color: var(--text-secondary); max-width: 420px; }

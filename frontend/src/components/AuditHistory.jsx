@@ -4,6 +4,7 @@ import {
   Award, Bug, Trash2, ExternalLink, RefreshCcw, ChevronRight
 } from 'lucide-react';
 import api from '../services/api';
+import { normalizeScanResult } from '../services/scanUtils';
 import './AuditHistory.css';
 
 const INPUT_ICON = {
@@ -47,17 +48,22 @@ export default function AuditHistory({ open, onClose, onLoad }) {
   const [loading, setLoading]   = useState(false);
   const [clearing, setClearing] = useState(false);
 
-  const fetchHistory = async () => {
+  const fetchHistory = async (options = {}) => {
     setLoading(true);
     try {
-      const data = await api.getHistory();
+      const data = await api.getHistory(options);
       setHistory(data);
-    } catch { /* backend offline */ }
+    } catch (e) {
+      if (e.name !== 'AbortError') { /* backend offline */ }
+    }
     finally { setLoading(false); }
   };
 
   useEffect(() => {
-    if (open) fetchHistory();
+    if (!open) return;
+    const abortCtrl = new AbortController();
+    fetchHistory({ signal: abortCtrl.signal });
+    return () => abortCtrl.abort();
   }, [open]);
 
   const handleClear = async () => {
@@ -72,11 +78,13 @@ export default function AuditHistory({ open, onClose, onLoad }) {
 
   const handleLoad = async (entry) => {
     try {
-      const data = await api.getHistoryResult(entry.id);
+      const data = normalizeScanResult({ ...(await api.getHistoryResult(entry.id)), status: entry.status });
       onLoad(data, entry.id);
       onClose();
     } catch (e) {
-      alert('Could not load this report: ' + e.message);
+      if (e.name !== 'AbortError') {
+        alert('Could not load this report: ' + e.message);
+      }
     }
   };
 

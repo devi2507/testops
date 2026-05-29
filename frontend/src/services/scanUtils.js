@@ -16,6 +16,22 @@ export function isCancelled(scan) {
 }
 
 /**
+ * Normalize API/history payloads so cancelled scans never show scores or findings.
+ */
+export function normalizeScanResult(scan) {
+  if (!scan || !isCancelled(scan)) return scan;
+  return {
+    ...scan,
+    status: 'cancelled',
+    grade: 'Cancelled',
+    securityScore: null,
+    bugsFound: null,
+    bugs: [],
+    aiAnalysis: undefined,
+  };
+}
+
+/**
  * A scan is completed if:
  * - it has an explicit status of "completed", OR
  * - it has a grade and is not cancelled (legacy records without a status field)

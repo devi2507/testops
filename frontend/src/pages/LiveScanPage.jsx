@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ProgressConsole from '../components/ProgressConsole';
 import ResultsDashboard from '../components/ResultsDashboard';
 import { useActiveScan } from '../context/ActiveScanContext';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
+import { normalizeScanResult } from '../services/scanUtils';
 import '../styles/newScan.css';
 
 export default function LiveScanPage() {
@@ -16,15 +17,20 @@ export default function LiveScanPage() {
   const [phase, setPhase] = useState('progress');
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
+  const completionHandledRef = useRef(false);
 
   const handleComplete = async () => {
+    if (completionHandledRef.current) return;
+    completionHandledRef.current = true;
+
     updateScanStatus('completed', 100);
     try {
-      const data = await api.getResults(testId);
+      const data = normalizeScanResult(await api.getResults(testId));
       setResults(data);
       setPhase('results');
-      toast?.success('Report generated');
-    } catch (err) {
+      toast?.success('Scan completed');
+    } catch {
+      completionHandledRef.current = false;
       setError('Failed to retrieve results.');
       toast?.error('Failed to retrieve results.');
     }

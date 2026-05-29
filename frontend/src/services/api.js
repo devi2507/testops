@@ -93,14 +93,35 @@ export const api = {
     throw new Error('Health check failed');
   },
   waitForBackend,
-  getHistory:      ()   => request('/api/history'),
-  getHistoryResult: (id) => request(`/api/history/${id}`),
-  deleteHistoryResult: (id) => request(`/api/history/${id}`, { method: 'DELETE' }),
-  clearHistory:    ()   => request('/api/history', { method: 'DELETE' }),
-  getResults:      (id) => request(`/api/test/results/${id}`),
-  cancelScan:      (id) => request(`/cancel-scan/${id}`, { method: 'POST' }),
-  startScan:       (formData) => formRequest('/api/test/start', formData),
-  startUrlScan:    (formData) => formRequest('/api/test/url-start', formData),
+  getHistory:      (options = {}) => request('/api/history', options),
+  getHistoryResult: async (id, options = {}) => {
+    if (!id) throw new Error('Invalid report ID');
+    try {
+      return await request(`/api/history/${id}`, options);
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      await sleep(500);
+      return request(`/api/history/${id}`, options);
+    }
+  },
+  deleteHistoryResult: (id, options = {}) => {
+    if (!id) throw new Error('Invalid report ID');
+    return request(`/api/history/${id}`, { method: 'DELETE', ...options });
+  },
+  clearHistory:    (options = {}) => request('/api/history', { method: 'DELETE', ...options }),
+  getResults:      async (id, options = {}) => {
+    if (!id) throw new Error('Invalid report ID');
+    try {
+      return await request(`/api/test/results/${id}`, options);
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      await sleep(500);
+      return request(`/api/test/results/${id}`, options);
+    }
+  },
+  cancelScan:      (id, options = {}) => request(`/cancel-scan/${id}`, { method: 'POST', ...options }),
+  startScan:       (formData, options = {}) => formRequest('/api/test/start', formData, options),
+  startUrlScan:    (formData, options = {}) => formRequest('/api/test/url-start', formData, options),
   progressStream:  (testId) => new EventSource(`${getBackendUrl()}/api/test/progress/${testId}`),
   getTemplates:    () => request('/api/templates'),
   createTemplate:  (template) => request('/api/templates', { method: 'POST', body: JSON.stringify(template) }),

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ShieldCheck, RefreshCcw, Search, Calendar, Code, Database, Layers, Globe } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import api from '../services/api';
+import { normalizeScanResult } from '../services/scanUtils';
 import ResultsDashboard from '../components/ResultsDashboard';
 import '../styles/reportPage.css';
 
@@ -35,18 +36,34 @@ export default function ReportPage() {
   const [loadingReport, setLoadingReport] = useState(false);
 
   useEffect(() => {
+    if (reportId) return; // Only fetch history list if we are on the list view
+
+    const abortCtrl = new AbortController();
     const loadHistory = async () => {
       setLoading(true);
       try {
-        setHistory(await api.getHistory());
-      } catch {
-        toast?.error('Could not load reports.');
+        setHistory(await api.getHistory({ signal: abortCtrl.signal }));
+      } catch (e) {
+        if (e.name !== 'AbortError') toast?.error('Could not load reports.');
       } finally {
         setLoading(false);
       }
     };
+    
     loadHistory();
-  }, [toast]);
+    
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') loadHistory();
+    };
+    window.addEventListener('visibilitychange', handleFocus);
+    window.addEventListener('focus', handleFocus);
+    
+    return () => {
+      abortCtrl.abort();
+      window.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [reportId, toast]);
 
   useEffect(() => {
     if (!reportId) {
@@ -54,19 +71,25 @@ export default function ReportPage() {
       return;
     }
 
+    const abortCtrl = new AbortController();
     const loadReport = async () => {
       setLoadingReport(true);
       try {
-        const data = await api.getHistoryResult(reportId);
-        setSelected({ ...data, id: reportId });
-      } catch {
-        toast?.error('Could not load report details.');
+        const data = await api.getHistoryResult(reportId, { signal: abortCtrl.signal });
+        setSelected(normalizeScanResult({ ...data, id: reportId }));
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          toast?.error('Could not load report details.');
+          setSelected(null);
+        }
       } finally {
         setLoadingReport(false);
       }
     };
 
     loadReport();
+    
+    return () => abortCtrl.abort();
   }, [reportId, toast]);
 
   const openReport = (id) => navigate(`/reports/${id}`);
@@ -145,8 +168,11 @@ export default function ReportPage() {
                 </div>
                 <div className="rp-rc__footer">
                   <span className="badge badge--accent">{label}</span>
-                  <span className="rp-rc__bugs" style={{ color: (scan.bugsFound || 0) > 5 ? 'var(--error)' : (scan.bugsFound || 0) > 0 ? 'var(--warning)' : 'var(--success)' }}>
-                    {scan.bugsFound ?? 0} issues
+                  <span
+                    className="rp-rc__bugs"
+                    style={{ color: scan.status === 'cancelled' ? 'var(--text-muted)' : (scan.bugsFound || 0) > 5 ? 'var(--error)' : (scan.bugsFound || 0) > 0 ? 'var(--warning)' : 'var(--success)' }}
+                  >
+                    {scan.status === 'cancelled' ? 'No results' : `${scan.bugsFound ?? 0} issues`}
                   </span>
                 </div>
                 <div className="rp-rc__date">

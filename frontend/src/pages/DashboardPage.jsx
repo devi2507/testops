@@ -86,26 +86,39 @@ export default function DashboardPage({ onNavigate }) {
   };
 
   useEffect(() => {
-    let active = true;
+    const abortCtrl = new AbortController();
 
     const checkBackend = async () => {
       try {
         await api.waitForBackend();
-        const data = await api.getHistory();
-        if (!active) return;
+        const data = await api.getHistory({ signal: abortCtrl.signal });
         setHistory(data);
         setBackendOk(true);
-      } catch {
-        if (!active) return;
-        setBackendOk(false);
+      } catch (e) {
+        if (e.name !== 'AbortError') setBackendOk(false);
       } finally {
-        if (!active) return;
         setLoading(false);
       }
     };
 
     checkBackend();
-    return () => { active = false; };
+    
+    const handleFocus = async () => {
+      if (document.visibilityState === 'visible') {
+        try {
+          const data = await api.getHistory({ signal: abortCtrl.signal });
+          setHistory(data);
+        } catch (e) {}
+      }
+    };
+    window.addEventListener('visibilitychange', handleFocus);
+    window.addEventListener('focus', handleFocus);
+    
+    return () => {
+      abortCtrl.abort();
+      window.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, []);
 
   useEffect(() => {

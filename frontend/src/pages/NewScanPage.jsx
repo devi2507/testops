@@ -309,9 +309,20 @@ export default function NewScanPage() {
     } finally { setLaunching(false); }
   };
 
+  const completionHandledRef = useRef(false);
   const handleComplete = async (id) => {
-    try { const data = await api.getResults(id); setResults(data); setPhase('results'); toast?.success('Report generated'); }
-    catch { setError('Failed to retrieve results.'); toast?.error('Failed to retrieve results.'); }
+    if (completionHandledRef.current) return;
+    completionHandledRef.current = true;
+    try {
+      const data = await api.getResults(id);
+      setResults(data);
+      setPhase('results');
+      toast?.success('Scan completed');
+    } catch {
+      completionHandledRef.current = false;
+      setError('Failed to retrieve results.');
+      toast?.error('Failed to retrieve results.');
+    }
   };
 
   const reset = () => {

@@ -9,6 +9,7 @@ import { jsPDF } from 'jspdf';
 import { useNavigate } from 'react-router-dom';
 import BackButton from './BackButton';
 import api from '../services/api';
+import { isCancelled, normalizeScanResult } from '../services/scanUtils';
 import { useActiveScan } from '../context/ActiveScanContext';
 import './ResultsDashboard.css';
 
@@ -29,7 +30,7 @@ const gradeColor = (g) => {
   return 'var(--error)';
 };
 
-const scoreColor = (s) => s >= 80 ? 'var(--success)' : s >= 60 ? 'var(--warning)' : 'var(--error)';
+const scoreColor = (s) => typeof s !== 'number' ? 'var(--text-muted)' : s >= 80 ? 'var(--success)' : s >= 60 ? 'var(--warning)' : 'var(--error)';
 const SEVERITY_FILTERS = ['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 
 function extractFixSnippet(text = '') {
@@ -64,11 +65,14 @@ function ReproSteps({ text }) {
 }
 
 // ─── PDF Export ─────────────────────────────────────────────────────────────
-function exportPDF(results) {
+function exportPDF(rawResults) {
+  const results = normalizeScanResult(rawResults);
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const W = doc.internal.pageSize.getWidth();
   const H = doc.internal.pageSize.getHeight();
   const margin = 44;
+  const cancelled = isCancelled(results);
+  const bugs = results?.bugs || [];
   let y = margin;
 
   const addPage = () => { doc.addPage(); y = margin; };
@@ -93,9 +97,9 @@ function exportPDF(results) {
   doc.text('Audit Summary', margin+14, y+20);
   doc.setFontSize(10); doc.setFont('helvetica', 'normal');
   const cols = [
-    [`Grade: ${results.grade||'—'}`, `Score: ${results.securityScore}/100`],
-    [`Total Issues: ${results.bugsFound}`, `HIGH: ${results.bugs?.filter(b=>b.severity==='HIGH').length||0}`],
-    [`MEDIUM: ${results.bugs?.filter(b=>b.severity==='MEDIUM').length||0}`, `LOW: ${results.bugs?.filter(b=>b.severity==='LOW').length||0}`],
+    [`Grade: ${cancelled ? 'Cancelled' : results.grade || '—'}`, `Score: ${cancelled ? '—' : `${results.securityScore}/100`}`],
+    [`Total Issues: ${cancelled ? '—' : results.bugsFound ?? 0}`, `HIGH: ${cancelled ? '—' : bugs.filter(b=>b.severity==='HIGH').length}`],
+    [`MEDIUM: ${cancelled ? '—' : bugs.filter(b=>b.severity==='MEDIUM').length}`, `LOW: ${cancelled ? '—' : bugs.filter(b=>b.severity==='LOW').length}`],
   ];
   cols.forEach(([l, r], i) => {
     doc.setTextColor(50,50,80);
@@ -104,29 +108,30 @@ function exportPDF(results) {
   });
   y += 106;
 
-  // Issues
-  doc.setFontSize(15); doc.setFont('helvetica', 'bold'); doc.setTextColor(30,30,60);
-  check(30); doc.text('Identified Issues', margin, y); y += 22;
+  if (!cancelled) {
+    doc.setFontSize(15); doc.setFont('helvetica', 'bold'); doc.setTextColor(30,30,60);
+    check(30); doc.text('Identified Issues', margin, y); y += 22;
 
-  results.bugs?.forEach((bug, i) => {
-    check(100);
-    const sc = bug.severity==='HIGH'?[220,38,38]:bug.severity==='MEDIUM'?[217,119,6]:bug.severity==='CRITICAL'?[185,28,28]:[56,189,248];
-    doc.setFillColor(...sc); doc.rect(margin, y, 4, 20, 'F');
-    doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(30,30,60);
-    doc.text(`${i+1}. ${bug.title}`, margin+12, y+14);
-    doc.setFontSize(8); doc.setTextColor(...sc);
-    doc.text(bug.severity, W-margin-50, y+14);
-    y += 26;
-    [['Root Cause', bug.reason], ['Reproduction', bug.reproduction], ['Fix', bug.recommendation]].forEach(([lbl, val]) => {
-      check(40);
-      doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(100,100,140);
-      doc.text(lbl.toUpperCase(), margin+12, y); y+=12;
-      doc.setFont('helvetica','normal'); doc.setTextColor(50,50,80);
-      doc.splitTextToSize(val||'',W-margin*2-12).forEach(ln=>{ check(14); doc.text(ln,margin+12,y); y+=13; });
-      y+=5;
+    bugs.forEach((bug, i) => {
+      check(100);
+      const sc = bug.severity==='HIGH'?[220,38,38]:bug.severity==='MEDIUM'?[217,119,6]:bug.severity==='CRITICAL'?[185,28,28]:[56,189,248];
+      doc.setFillColor(...sc); doc.rect(margin, y, 4, 20, 'F');
+      doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(30,30,60);
+      doc.text(`${i+1}. ${bug.title}`, margin+12, y+14);
+      doc.setFontSize(8); doc.setTextColor(...sc);
+      doc.text(bug.severity, W-margin-50, y+14);
+      y += 26;
+      [['Root Cause', bug.reason], ['Reproduction', bug.reproduction], ['Fix', bug.recommendation]].forEach(([lbl, val]) => {
+        check(40);
+        doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(100,100,140);
+        doc.text(lbl.toUpperCase(), margin+12, y); y+=12;
+        doc.setFont('helvetica','normal'); doc.setTextColor(50,50,80);
+        doc.splitTextToSize(val||'',W-margin*2-12).forEach(ln=>{ check(14); doc.text(ln,margin+12,y); y+=13; });
+        y+=5;
+      });
+      y += 10;
     });
-    y += 10;
-  });
+  }
 
   doc.save(`testops_audit_${Date.now()}.pdf`);
 }
@@ -144,17 +149,20 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
 
   if (!results) return null;
 
-  const bugs       = results.bugs || [];
-  const highCount  = bugs.filter(b => b.severity === 'HIGH').length;
-  const medCount   = bugs.filter(b => b.severity === 'MEDIUM').length;
-  const lowCount   = bugs.filter(b => b.severity === 'LOW').length;
-  const critCount  = bugs.filter(b => b.severity === 'CRITICAL').length;
-  const total      = bugs.length;
-  const noBugs     = total === 0;
-  const gc         = gradeColor(results.grade);
-  const sc         = scoreColor(results.securityScore);
+  const scan = normalizeScanResult(results);
+  const cancelled = isCancelled(scan);
+  const bugs       = scan.bugs || [];
+  const highCount  = cancelled ? 0 : bugs.filter(b => b.severity === 'HIGH').length;
+  const medCount   = cancelled ? 0 : bugs.filter(b => b.severity === 'MEDIUM').length;
+  const lowCount   = cancelled ? 0 : bugs.filter(b => b.severity === 'LOW').length;
+  const critCount  = cancelled ? 0 : bugs.filter(b => b.severity === 'CRITICAL').length;
+  const total      = cancelled ? 0 : bugs.length;
+  const noBugs     = !cancelled && total === 0;
+  const gc         = cancelled ? 'var(--warning)' : gradeColor(scan.grade);
+  const sc         = cancelled ? 'var(--text-muted)' : scoreColor(scan.securityScore);
 
   const breakdown = useMemo(() => {
+    if (cancelled) return [];
     const severityPenalty = highCount * 15 + medCount * 7 + lowCount * 3 + critCount * 20;
     return [
       { label: 'Security', value: Math.max(0, 100 - severityPenalty), color: 'var(--error)' },
@@ -162,7 +170,7 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
       { label: 'Maintainability', value: Math.max(0, 94 - lowCount * 5 - medCount * 4), color: 'var(--accent)' },
       { label: 'Performance', value: Math.max(0, 92 - bugs.filter(b => (b.type || '').toLowerCase().includes('performance')).length * 12), color: 'var(--warning)' },
     ];
-  }, [bugs, critCount, highCount, lowCount, medCount]);
+  }, [bugs, cancelled, critCount, highCount, lowCount, medCount]);
 
   useEffect(() => {
     // Clear active scan if we are viewing its final report
@@ -174,12 +182,13 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
     try {
       localStorage.setItem('testops_current_report', JSON.stringify({
         id:            testId,
-        securityScore: results.securityScore,
-        score:         results.securityScore, // keep both for compatibility
-        grade:         results.grade,
-        bugsFound:     results.bugsFound,
-        target:        results.target || '',
-        bugs: bugs.map(b => ({
+        status:        scan.status || (cancelled ? 'cancelled' : 'completed'),
+        securityScore: cancelled ? null : (scan.securityScore ?? null),
+        score:         cancelled ? null : (scan.securityScore ?? null),
+        grade:         scan.grade,
+        bugsFound:     cancelled ? null : (scan.bugsFound ?? null),
+        target:        scan.target || '',
+        bugs: cancelled ? [] : bugs.map(b => ({
           title:          b.title,
           severity:       b.severity,
           type:           b.type,
@@ -188,7 +197,7 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
         })),
       }));
     } catch {}
-  }, [bugs, results.securityScore, results.grade, results.bugsFound, results.target, testId, activeScan, clearActiveScan]);
+  }, [bugs, cancelled, scan.securityScore, scan.grade, scan.bugsFound, scan.target, scan.status, testId, activeScan, clearActiveScan]);
 
   const visibleBugs = useMemo(() => {
     const q = vulnSearch.trim().toLowerCase();
@@ -215,20 +224,28 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
       <BackButton label={backLabel} fallback={backTo} />
 
       {/* ══ HERO HEADER ════════════════════════════════════════════════════ */}
-      <div className="report-hero glass-card">
+      <div className={`report-hero glass-card${cancelled ? ' report-hero--cancelled' : ''}`}>
         <div className="report-hero__left">
-          <div className="report-grade-ring" style={{ '--gc': gc }}>
-            <span className="report-grade-ring__letter" style={{ color: gc }}>
-              {results.grade || '?'}
-            </span>
+          <div className={`report-grade-ring ${cancelled ? 'report-grade-ring--cancelled' : ''}`} style={{ '--gc': gc }}>
+            {cancelled ? (
+              <AlertCircle size={28} color={gc} />
+            ) : (
+              <span className="report-grade-ring__letter" style={{ color: gc }}>
+                {scan.grade || '?'}
+              </span>
+            )}
           </div>
           <div>
-            <h1 className="report-hero__title">Security Audit Report</h1>
-            <p className="report-hero__sub">AI-powered analysis · {new Date().toLocaleDateString()}</p>
+            <h1 className="report-hero__title">{cancelled ? 'Scan Cancelled' : 'Security Audit Report'}</h1>
+            <p className="report-hero__sub">
+              {cancelled
+                ? 'The scan was cancelled before completion.'
+                : `AI-powered analysis · ${new Date().toLocaleDateString()}`}
+            </p>
             <div className="report-hero__badges">
-              <span className="badge badge--accent">TestOps Platform</span>
-              {noBugs && <span className="badge badge--success">✓ All Clear</span>}
-              {highCount > 0 && <span className="badge badge--error">{highCount} High Severity</span>}
+              <span className={`badge ${cancelled ? 'badge--warning' : 'badge--accent'}`}>{cancelled ? 'Cancelled' : 'TestOps Platform'}</span>
+              {!cancelled && noBugs && <span className="badge badge--success">✓ All Clear</span>}
+              {!cancelled && highCount > 0 && <span className="badge badge--error">{highCount} High Severity</span>}
             </div>
           </div>
         </div>
@@ -269,19 +286,21 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
         {/* Score card */}
         <div className="rstat-card glass-card">
           <div className="rstat-card__label">Security Score</div>
-          <div className="rstat-card__value" style={{ color: sc }}>{results.securityScore}<span style={{fontSize:'1rem',color:'var(--text-muted)'}}>/100</span></div>
+          <div className="rstat-card__value" style={{ color: sc }}>{cancelled ? '--' : scan.securityScore}<span style={{fontSize:'1rem',color:'var(--text-muted)'}}>{cancelled ? '' : '/100'}</span></div>
           <div className="rstat-score-bar">
-            <div className="rstat-score-bar__fill" style={{ width:`${results.securityScore}%`, background: sc }} />
+            <div className="rstat-score-bar__fill" style={{ width: cancelled ? '0%' : `${scan.securityScore ?? 0}%`, background: sc }} />
           </div>
         </div>
 
         {/* Total issues */}
         <div className="rstat-card glass-card">
           <div className="rstat-card__label">Total Issues</div>
-          <div className="rstat-card__value" style={{ color: noBugs ? 'var(--success)' : 'var(--error)' }}>
-            {noBugs ? <ShieldCheck size={32} /> : total}
+          <div className="rstat-card__value" style={{ color: cancelled ? 'var(--text-muted)' : noBugs ? 'var(--success)' : 'var(--error)' }}>
+            {cancelled ? '--' : noBugs ? <ShieldCheck size={32} /> : total}
           </div>
-          <div className="rstat-card__sub">{noBugs ? 'No vulnerabilities found' : 'vulnerabilities detected'}</div>
+          <div className="rstat-card__sub">
+            {cancelled ? 'Scan was cancelled. No results were generated.' : noBugs ? 'No vulnerabilities found' : 'vulnerabilities detected'}
+          </div>
         </div>
 
         {/* Severity breakdown */}
@@ -299,41 +318,57 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
                 <div className="sev-bar-row__track">
                   <div
                     className="sev-bar-row__fill"
-                    style={{ width: total > 0 ? `${(count/total)*100}%` : '0%', background: color }}
+                    style={{ width: cancelled ? '0%' : total > 0 ? `${(count/total)*100}%` : '0%', background: color }}
                   />
                 </div>
-                <span className="sev-bar-row__count" style={{ color }}>{count}</span>
+                <span className="sev-bar-row__count" style={{ color }}>{cancelled ? '--' : count}</span>
               </div>
             ))}
           </div>
         </div>
       </div>
 
-      <div className="score-intel glass-card">
-        <div className="score-ring" style={{ '--score': results.securityScore, '--score-color': sc }}>
-          <span>{results.securityScore}</span>
-          <small>/100</small>
-        </div>
-        <div className="score-intel__body">
-          <div className="score-intel__head">
-            <div>
-              <h3>AI Security Score</h3>
-              <p>Weighted across security, stability, maintainability, and performance signals.</p>
+      {cancelled ? (
+        <div className="score-intel score-intel--cancelled glass-card">
+          <div className="score-intel__cancel-icon">
+            <AlertCircle size={28} color="var(--warning)" />
+          </div>
+          <div className="score-intel__body">
+            <div className="score-intel__head">
+              <div>
+                <h3>Scan Cancelled</h3>
+                <p>The scan was cancelled before completion, so no security score, AI score, or analysis summary was generated.</p>
+              </div>
             </div>
           </div>
-          <div className="score-breakdown">
-            {breakdown.map(item => (
-              <div key={item.label} className="score-breakdown__row">
-                <span>{item.label}</span>
-                <div className="score-breakdown__track">
-                  <div style={{ width: `${item.value}%`, background: item.color }} />
-                </div>
-                <strong>{item.value}</strong>
+        </div>
+      ) : (
+        <div className="score-intel glass-card">
+          <div className="score-ring" style={{ '--score': scan.securityScore, '--score-color': sc }}>
+            <span>{scan.securityScore}</span>
+            <small>/100</small>
+          </div>
+          <div className="score-intel__body">
+            <div className="score-intel__head">
+              <div>
+                <h3>AI Security Score</h3>
+                <p>Weighted across security, stability, maintainability, and performance signals.</p>
               </div>
-            ))}
+            </div>
+            <div className="score-breakdown">
+              {breakdown.map(item => (
+                <div key={item.label} className="score-breakdown__row">
+                  <span>{item.label}</span>
+                  <div className="score-breakdown__track">
+                    <div style={{ width: `${item.value}%`, background: item.color }} />
+                  </div>
+                  <strong>{item.value}</strong>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* ══ SECTION TABS ═══════════════════════════════════════════════════ */}
       <div className="report-tabs">
@@ -341,7 +376,7 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
           className={`report-tab ${activeSection==='vulnerabilities' ? 'report-tab--active' : ''}`}
           onClick={() => setActiveSection('vulnerabilities')}
         >
-          <Bug size={15} /> Vulnerabilities ({total})
+          <Bug size={15} /> Vulnerabilities{cancelled ? '' : ` (${total})`}
         </button>
         <button
           className={`report-tab ${activeSection==='analysis' ? 'report-tab--active' : ''}`}
@@ -354,27 +389,35 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
       {/* ══ VULNERABILITIES TAB ════════════════════════════════════════════ */}
       {activeSection === 'vulnerabilities' && (
         <div className="report-section">
-          <div className="report-vuln-controls glass-card">
-            <div className="report-vuln-controls__filters">
-              {SEVERITY_FILTERS.map(filter => (
-                <button
-                  key={filter}
-                  className={`report-vuln-filter ${severityFilter === filter ? 'report-vuln-filter--active' : ''}`}
-                  onClick={() => setSeverityFilter(filter)}
-                >
-                  {filter}
-                </button>
-              ))}
+          {!cancelled && (
+            <div className="report-vuln-controls glass-card">
+              <div className="report-vuln-controls__filters">
+                {SEVERITY_FILTERS.map(filter => (
+                  <button
+                    key={filter}
+                    className={`report-vuln-filter ${severityFilter === filter ? 'report-vuln-filter--active' : ''}`}
+                    onClick={() => setSeverityFilter(filter)}
+                  >
+                    {filter}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="report-vuln-search"
+                placeholder="Search vulnerabilities..."
+                value={vulnSearch}
+                onChange={e => setVulnSearch(e.target.value)}
+              />
             </div>
-            <input
-              className="report-vuln-search"
-              placeholder="Search vulnerabilities..."
-              value={vulnSearch}
-              onChange={e => setVulnSearch(e.target.value)}
-            />
-          </div>
+          )}
 
-          {noBugs ? (
+          {cancelled ? (
+            <div className="report-empty report-empty--cancelled glass-card">
+              <AlertCircle size={52} color="var(--warning)" />
+              <h2>Scan was cancelled. No results were generated.</h2>
+              <p>The scan was interrupted before completion, so there are no findings to review.</p>
+            </div>
+          ) : noBugs ? (
             <div className="report-empty glass-card">
               <ShieldCheck size={52} color="var(--success)" />
               <h2>No Vulnerabilities Found</h2>
@@ -500,8 +543,12 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
             </div>
 
             <div className="ai-analysis__body">
-              {results.aiAnalysis ? (
-                <div className="ai-analysis__text">{results.aiAnalysis}</div>
+              {cancelled ? (
+                <div className="ai-analysis__text">
+                  AI analysis is unavailable for cancelled scans. No findings or security summary were generated.
+                </div>
+              ) : scan.aiAnalysis ? (
+                <div className="ai-analysis__text">{scan.aiAnalysis}</div>
               ) : (
                 <>
                   <div className="ai-analysis__text">
@@ -529,12 +576,12 @@ export default function ResultsDashboard({ results, testId, onReset, backTo = '/
                         )}
                       </ul>
 
-                      <div className="ai-analysis__section-title">Security Grade: <span style={{ color: gc }}>{results.grade}</span></div>
+                      <div className="ai-analysis__section-title">Security Grade: <span style={{ color: gc }}>{scan.grade}</span></div>
                       <div className="ai-analysis__text">
-                        Score of {results.securityScore}/100. {
-                          results.securityScore >= 90 ? 'Excellent security posture with minor improvements possible.' :
-                          results.securityScore >= 75 ? 'Good overall security with some gaps that should be addressed.' :
-                          results.securityScore >= 55 ? 'Moderate security posture with multiple vulnerabilities requiring remediation.' :
+                        Score of {scan.securityScore}/100. {
+                          scan.securityScore >= 90 ? 'Excellent security posture with minor improvements possible.' :
+                          scan.securityScore >= 75 ? 'Good overall security with some gaps that should be addressed.' :
+                          scan.securityScore >= 55 ? 'Moderate security posture with multiple vulnerabilities requiring remediation.' :
                           'Critical security issues present. Immediate remediation recommended before deployment.'
                         }
                       </div>
